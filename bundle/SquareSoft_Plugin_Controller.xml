@@ -359,11 +359,21 @@ function ApplyGutterLayout(meta, geometryScale)
     left = math.max(0, RoundNumber(left * geometryScale))
     right = math.max(0, RoundNumber(right * geometryScale))
 
-    CallPlugin(
-        UI_LAYOUT_CONTROLLER_ID,
-        "ApplyManagedGutterLayout",
-        tostring(left) .. "\t" .. tostring(right)
-    )
+    local rc =
+        CallPlugin(
+            UI_LAYOUT_CONTROLLER_ID,
+            "ApplyManagedGutterLayout",
+            tostring(left) .. "\t" .. tostring(right)
+        )
+
+    if rc ~= error_code.eOK then
+        ControllerNote(
+            "yellow",
+            "Layout Controller gutter restore failed (error " ..
+            tostring(rc) ..
+            "); continuing with window placement."
+        )
+    end
 end
 
 function ComputeScaleInfo(meta)
@@ -546,11 +556,20 @@ function ScaleKnownPluginFonts(typeScale)
     if IsPluginInstalled(CHAT_PLUGIN_ID) and
        PluginSupports(CHAT_PLUGIN_ID, "ApplyManagedTypography") == error_code.eOK
     then
-        CallPlugin(
-            CHAT_PLUGIN_ID,
-            "ApplyManagedTypography",
-            tostring(s)
-        )
+        local rc =
+            CallPlugin(
+                CHAT_PLUGIN_ID,
+                "ApplyManagedTypography",
+                tostring(s)
+            )
+
+        if rc ~= error_code.eOK then
+            ControllerNote(
+                "yellow",
+                "Chat typography scaling skipped (error " ..
+                tostring(rc) .. ")."
+            )
+        end
     end
 
 end

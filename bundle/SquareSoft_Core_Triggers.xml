@@ -10,12 +10,12 @@
     purpose="Portable SquareSoft status colouring and cooldown notices"
     date_written="2026-09-14"
     requires="4.73"
-    version="1.0"
+    version="1.10"
     save_state="y"
 >
 <description trim="y">
 <![CDATA[
-SQUARESOFT CORE TRIGGERS v1.1
+SQUARESOFT CORE TRIGGERS v1.10
 
 Portable replacements for SquareSoft triggers that previously lived in the
 MUSHclient world file.
@@ -39,10 +39,22 @@ All trigger names are stable and live in group SS_CORE.
 
 <triggers>
   <trigger
+      name="SS_CORE_LEARNED_HPMP"
+      group="SS_CORE"
+      script="ColourLearnedStats"
+      match="(?!)"
+      regexp="y"
+      enabled="n"
+      keep_evaluating="y"
+      omit_from_output="y"
+      sequence="890"
+  ></trigger>
+
+  <trigger
       name="SS_CORE_STATS_HPMP"
       group="SS_CORE"
       script="ColourStats"
-      match="^(&lt;&lt;)(HP:\s*)(\d+)(/)(\d+)(\s*MP:\s*)(\d+)(/)(\d+)(&gt;&gt;)$"
+      match="^\s*&lt;&lt;HP:.*&gt;&gt;\s*$"
       regexp="y"
       enabled="y"
       keep_evaluating="y"
@@ -54,7 +66,7 @@ All trigger names are stable and live in group SS_CORE.
       name="SS_CORE_OVERALL_CONDITION"
       group="SS_CORE"
       script="ColourCondition"
-      match="^(&lt;&lt;)(OVERALL CONDITION:\s*&lt;HP:\s*)(\d+)(%&gt;\s*&lt;SP:\s*)(\d+)(%&gt;\s*&lt;)(Mob)(:\s*[^&gt;]*&gt;\s*)(Exp)(:\s*[\d.]+%\s*)(&gt;&gt;)$"
+      match="^\s*&lt;&lt;OVERALL CONDITION:.*&gt;&gt;\s*$"
       regexp="y"
       enabled="y"
       keep_evaluating="y"
@@ -66,7 +78,7 @@ All trigger names are stable and live in group SS_CORE.
       name="SS_CORE_CHAKRA_READY_NOTICE"
       group="SS_CORE"
       script="ChakraReadyNotice"
-      match="^You can use chakra again\.$"
+      match="^\s*You can use chakra again\.\s*$"
       regexp="y"
       ignore_case="y"
       enabled="y"
@@ -111,8 +123,14 @@ All trigger names are stable and live in group SS_CORE.
 <![CDATA[
 
 CORE_TRIGGER_GROUP = "SS_CORE"
+GAUGE_PLUGIN_ID = "d47f6a92e1b83c5f0a9e2716"
+LEARNED_TRIGGER_NAME = "SS_CORE_LEARNED_HPMP"
+
 local coreEnabled = GetVariable("core_enabled") ~= "false"
 local chakraNoticesEnabled = GetVariable("chakra_notices_enabled") ~= "false"
+
+local learnedHP = nil
+local learnedMP = nil
 
 local function Clamp(value, low, high)
     value = tonumber(value) or low
@@ -137,29 +155,52 @@ local function Lerp(a, b, t)
     return a + (b - a) * t
 end
 
+-- Keep the status-line colours identical to the cockpit gauges.
+-- The old two-channel red<->green lerp produced muddy brown around 40%.
+local HP_STOPS = {
+    {100, {65, 255, 95}},
+    {80,  {120, 255, 70}},
+    {60,  {225, 245, 55}},
+    {40,  {255, 180, 45}},
+    {20,  {255, 95, 45}},
+    {0,   {255, 45, 55}}
+}
+
+local MP_STOPS = {
+    {100, {60, 235, 255}},
+    {50,  {180, 70, 255}},
+    {0,   {255, 65, 75}}
+}
+
+local function GradientName(percent, stops)
+    local p = Clamp(percent, 0, 100)
+
+    for i = 1, #stops - 1 do
+        local highP, highC = stops[i][1], stops[i][2]
+        local lowP, lowC = stops[i + 1][1], stops[i + 1][2]
+
+        if p <= highP and p >= lowP then
+            local span = highP - lowP
+            local t = span > 0 and ((p - lowP) / span) or 0
+
+            return RGBName(
+                Lerp(lowC[1], highC[1], t),
+                Lerp(lowC[2], highC[2], t),
+                Lerp(lowC[3], highC[3], t)
+            )
+        end
+    end
+
+    local c = stops[#stops][2]
+    return RGBName(c[1], c[2], c[3])
+end
+
 local function HPGradient(percent)
-    local t = Clamp(percent, 0, 100) / 100
-    return RGBName(255 * (1 - t), 255 * t, 0)
+    return GradientName(percent, HP_STOPS)
 end
 
 local function MPGradient(percent)
-    local p = Clamp(percent, 0, 100)
-
-    -- 0% red -> 50% light purple -> 100% cyan.
-    local r, g, b
-    if p <= 50 then
-        local t = p / 50
-        r = Lerp(255, 200, t)
-        g = Lerp(0,   135, t)
-        b = Lerp(0,   255, t)
-    else
-        local t = (p - 50) / 50
-        r = Lerp(200, 0,   t)
-        g = Lerp(135, 255, t)
-        b = Lerp(255, 255, t)
-    end
-
-    return RGBName(r, g, b)
+    return GradientName(percent, MP_STOPS)
 end
 
 local function SafePercent(current, maximum)
@@ -169,36 +210,541 @@ local function SafePercent(current, maximum)
     return Clamp((current / maximum) * 100, 0, 100)
 end
 
-function ColourStats(name, line, wildcards)
-    local hpColour = HPGradient(SafePercent(wildcards[3], wildcards[5]))
-    local mpColour = MPGradient(SafePercent(wildcards[7], wildcards[9]))
+local function LoadLearnedGaugeCalibration()
+    local hpPattern = GetVariable("learned_hp_pattern")
+    local hpMode = GetVariable("learned_hp_mode")
+    local hpRegex = GetVariable("learned_hp_regex")
+    local mpPattern = GetVariable("learned_mp_pattern")
+    local mpMode = GetVariable("learned_mp_mode")
+    local mpRegex = GetVariable("learned_mp_regex")
+    local hpLineRegex = GetVariable("learned_hp_line_regex")
+    local mpLineRegex = GetVariable("learned_mp_line_regex")
 
-    ColourTell("green", "", wildcards[1] or "<<")
-    Tell(wildcards[2] or "HP: ")
-    ColourTell(hpColour, "", wildcards[3] or "")
-    Tell((wildcards[4] or "/") .. (wildcards[5] or "") .. (wildcards[6] or " MP: "))
-    ColourTell(mpColour, "", wildcards[7] or "")
-    Tell(wildcards[8] or "/")
-    ColourTell(mpColour, "", wildcards[9] or "")
-    ColourTell("green", "", wildcards[10] or ">>")
+    if not hpPattern or hpPattern == "" or
+       not hpRegex or hpRegex == "" or
+       not mpPattern or mpPattern == "" or
+       not mpRegex or mpRegex == ""
+    then
+        learnedHP = nil
+        learnedMP = nil
+        return false
+    end
+
+    learnedHP = {
+        pattern = hpPattern,
+        mode = hpMode,
+        regex = hpRegex,
+        lineRegex = hpLineRegex
+    }
+
+    learnedMP = {
+        pattern = mpPattern,
+        mode = mpMode,
+        regex = mpRegex,
+        lineRegex = mpLineRegex
+    }
+
+    return true
+end
+
+local function SaveLearnedGaugeCalibration()
+    if learnedHP and learnedMP then
+        SetVariable("learned_hp_pattern", tostring(learnedHP.pattern or ""))
+        SetVariable("learned_hp_mode", tostring(learnedHP.mode or ""))
+        SetVariable("learned_hp_regex", tostring(learnedHP.regex or ""))
+        SetVariable("learned_mp_pattern", tostring(learnedMP.pattern or ""))
+        SetVariable("learned_mp_mode", tostring(learnedMP.mode or ""))
+        SetVariable("learned_mp_regex", tostring(learnedMP.regex or ""))
+        SetVariable("learned_hp_line_regex", tostring(learnedHP.lineRegex or ""))
+        SetVariable("learned_mp_line_regex", tostring(learnedMP.lineRegex or ""))
+    else
+        SetVariable("learned_hp_pattern", "")
+        SetVariable("learned_hp_mode", "")
+        SetVariable("learned_hp_regex", "")
+        SetVariable("learned_mp_pattern", "")
+        SetVariable("learned_mp_mode", "")
+        SetVariable("learned_mp_regex", "")
+        SetVariable("learned_hp_line_regex", "")
+        SetVariable("learned_mp_line_regex", "")
+    end
+end
+
+local function ApplyLearnedGradientTrigger()
+    if not learnedHP or not learnedMP then
+        SetTriggerOption(LEARNED_TRIGGER_NAME, "match", "(?!)")
+        EnableTrigger(LEARNED_TRIGGER_NAME, false)
+        return false
+    end
+
+    local hpLineRegex =
+        tostring(learnedHP.lineRegex or "")
+    local mpLineRegex =
+        tostring(learnedMP.lineRegex or "")
+
+    local match
+
+    if hpLineRegex ~= "" and mpLineRegex ~= "" then
+        -- The stored calibration sample defines the legitimate status-line
+        -- shape. Only those full-line fingerprints may activate the learned
+        -- gradient, even if HP-like text appears elsewhere in game output.
+        if hpLineRegex == mpLineRegex then
+            match = hpLineRegex
+        else
+            match =
+                "(?:" ..
+                hpLineRegex ..
+                "|" ..
+                mpLineRegex ..
+                ")"
+        end
+    else
+        -- Legacy calibration fallback for users who have not yet stored a
+        -- reference sample. New v2.11+ calibrations always use line fingerprints.
+        match =
+            "^.*(?:" ..
+            tostring(learnedHP.regex or "") ..
+            "|" ..
+            tostring(learnedMP.regex or "") ..
+            ").*$"
+    end
+
+    local rc = SetTriggerOption(
+        LEARNED_TRIGGER_NAME,
+        "match",
+        match
+    )
+
+    if rc ~= error_code.eOK then
+        EnableTrigger(LEARNED_TRIGGER_NAME, false)
+        return false
+    end
+
+    EnableTrigger(LEARNED_TRIGGER_NAME, coreEnabled)
+    return true
+end
+
+function SetGaugeCalibration(
+    hpPattern,
+    hpMode,
+    hpRegex,
+    mpPattern,
+    mpMode,
+    mpRegex,
+    hpLineRegex,
+    mpLineRegex
+)
+    hpPattern = tostring(hpPattern or "")
+    hpMode = tostring(hpMode or "")
+    hpRegex = tostring(hpRegex or "")
+    mpPattern = tostring(mpPattern or "")
+    mpMode = tostring(mpMode or "")
+    mpRegex = tostring(mpRegex or "")
+    hpLineRegex = tostring(hpLineRegex or "")
+    mpLineRegex = tostring(mpLineRegex or "")
+
+    if hpPattern == "" or hpRegex == "" or
+       mpPattern == "" or mpRegex == ""
+    then
+        return "invalid"
+    end
+
+    if (hpMode ~= "percent" and
+        hpMode ~= "currentmax" and
+        hpMode ~= "currentmax_percent") or
+       (mpMode ~= "percent" and
+        mpMode ~= "currentmax" and
+        mpMode ~= "currentmax_percent")
+    then
+        return "invalid"
+    end
+
+    learnedHP = {
+        pattern = hpPattern,
+        mode = hpMode,
+        regex = hpRegex,
+        lineRegex = hpLineRegex
+    }
+
+    learnedMP = {
+        pattern = mpPattern,
+        mode = mpMode,
+        regex = mpRegex,
+        lineRegex = mpLineRegex
+    }
+
+    SaveLearnedGaugeCalibration()
+    ApplyLearnedGradientTrigger()
+    pcall(SaveState)
+    return "ok"
+end
+
+function ClearGaugeCalibration()
+    learnedHP = nil
+    learnedMP = nil
+    SaveLearnedGaugeCalibration()
+    ApplyLearnedGradientTrigger()
+    pcall(SaveState)
+    return "ok"
+end
+
+local function ParseLearnedField(spec, line, kind)
+    if not spec then
+        return nil
+    end
+
+    local s, e, first, second =
+        tostring(line or ""):find(spec.pattern)
+
+    if not s then
+        return nil
+    end
+
+    local firstText = tostring(first or ""):gsub(",", "")
+    local secondText = tostring(second or ""):gsub(",", "")
+    first = tonumber(firstText)
+    second = tonumber(secondText)
+
+    if not first then
+        return nil
+    end
+
+    local percent
+
+    if spec.mode == "percent" then
+        percent = Clamp(first, 0, 100)
+    else
+        if not second or second <= 0 then
+            return nil
+        end
+        percent = SafePercent(first, second)
+    end
+
+    return {
+        startPos = s,
+        endPos = e,
+        percent = percent,
+        kind = kind,
+        mode = spec.mode
+    }
+end
+
+local function LearnedFieldsForLine(line)
+    if not learnedHP or not learnedMP then
+        return {}
+    end
+
+    local fields = {}
+    local hpField = ParseLearnedField(learnedHP, line, "hp")
+    local mpField = ParseLearnedField(learnedMP, line, "mp")
+
+    if hpField then fields[#fields + 1] = hpField end
+    if mpField then fields[#fields + 1] = mpField end
+
+    table.sort(
+        fields,
+        function(a, b)
+            return a.startPos < b.startPos
+        end
+    )
+
+    return fields
+end
+
+local function LearnedLineMatches(line)
+    local fields = LearnedFieldsForLine(line)
+    return #fields > 0
+end
+
+local function LearnedOverrideSpans(line, fields)
+    local spans = {}
+
+    for _, field in ipairs(fields or {}) do
+        local fieldText =
+            tostring(line or ""):sub(
+                field.startPos,
+                field.endPos
+            )
+
+        local numeric = {}
+        local pos = 1
+
+        while true do
+            local s, e =
+                fieldText:find(
+                    "%d[%d,]*%.?%d*",
+                    pos
+                )
+
+            if not s then break end
+
+            numeric[#numeric + 1] = {
+                startPos = field.startPos + s - 1,
+                endPos = field.startPos + e - 1
+            }
+
+            pos = e + 1
+        end
+
+        local count = 1
+
+        -- Apply the gradient to every numeric component that belongs to the
+        -- calibrated gauge field, while preserving separators/brackets/labels
+        -- in the MUD's original styles.
+        if field.mode == "currentmax" then
+            count = 2
+
+            -- Backward compatibility for calibrations saved before compound
+            -- current/max + displayed-percent fields were explicitly learned.
+            -- If a percentage immediately follows the learned current/max
+            -- value (eg. "11061/11061: 100%"), include that percentage in the
+            -- same gradient without forcing the user to recalibrate.
+            local suffix =
+                tostring(line or ""):sub(
+                    field.endPos + 1,
+                    math.min(#tostring(line or ""), field.endPos + 24)
+                )
+            local relStart, relEnd =
+                suffix:find(
+                    "^%s*:%s*%d[%d,]*%.?%d*%s*%%"
+                )
+
+            if relStart then
+                local numberStart, numberEnd =
+                    suffix:find("%d[%d,]*%.?%d*", relStart)
+
+                if numberStart then
+                    numeric[#numeric + 1] = {
+                        startPos = field.endPos + numberStart,
+                        endPos = field.endPos + numberEnd
+                    }
+                    count = 3
+                end
+            end
+        elseif field.mode == "currentmax_percent" then
+            count = 3
+        end
+
+        local colour =
+            field.kind == "hp"
+            and HPGradient(field.percent)
+            or MPGradient(field.percent)
+
+        for i = 1, math.min(count, #numeric) do
+            spans[#spans + 1] = {
+                startPos = numeric[i].startPos,
+                endPos = numeric[i].endPos,
+                colour = colour
+            }
+        end
+    end
+
+    table.sort(
+        spans,
+        function(a, b)
+            return a.startPos < b.startPos
+        end
+    )
+
+    return spans
+end
+
+local function OverrideColourAt(spans, position)
+    for _, span in ipairs(spans or {}) do
+        if position >= span.startPos and
+           position <= span.endPos
+        then
+            return span.colour
+        end
+    end
+
+    return nil
+end
+
+local function EmitStyledSegment(text, style, overrideColour)
+    if not text or text == "" then
+        return
+    end
+
+    local fg =
+        overrideColour or
+        RGBColourToName(
+            tonumber(style and style.textcolour) or 0
+        )
+
+    local bg =
+        RGBColourToName(
+            tonumber(style and style.backcolour) or 0
+        )
+
+    NoteStyle(
+        tonumber(style and style.style) or 0
+    )
+
+    ColourTell(
+        fg,
+        bg,
+        text
+    )
+end
+
+local function EmitPreservedStyledLine(line, styles, overrideSpans)
+    line = tostring(line or "")
+
+    if type(styles) ~= "table" or #styles == 0 then
+        -- Never flatten a MUD-formatted bar merely to apply the gradient.
+        -- If style metadata is unexpectedly unavailable, fail open and show
+        -- the original text without our colour override.
+        NoteStyle(0)
+        Note(line)
+        return
+    end
+
+    local absolutePos = 1
+
+    for _, style in ipairs(styles) do
+        local styleText = tostring(style.text or "")
+        local styleLength = #styleText
+        local localPos = 1
+
+        while localPos <= styleLength do
+            local globalPos = absolutePos + localPos - 1
+            local override =
+                OverrideColourAt(
+                    overrideSpans,
+                    globalPos
+                )
+
+            local runEnd = localPos
+
+            while runEnd < styleLength do
+                local nextGlobal =
+                    absolutePos + runEnd
+
+                if OverrideColourAt(
+                    overrideSpans,
+                    nextGlobal
+                ) ~= override
+                then
+                    break
+                end
+
+                runEnd = runEnd + 1
+            end
+
+            EmitStyledSegment(
+                styleText:sub(
+                    localPos,
+                    runEnd
+                ),
+                style,
+                override
+            )
+
+            localPos = runEnd + 1
+        end
+
+        absolutePos =
+            absolutePos + styleLength
+    end
+
+    NoteStyle(0)
+    Note("")
+end
+
+function ColourLearnedStats(name, line, wildcards, styles)
+    local text = tostring(line or "")
+    local fields = LearnedFieldsForLine(text)
+
+    if #fields == 0 then
+        -- This should not normally happen because the trigger itself is
+        -- generated from the learned regexes. Fail open if they ever drift.
+        NoteStyle(0)
+        Note(text)
+        return
+    end
+
+    -- Preserve every original MUD style run and overlay only the numeric
+    -- portions that the HP/MP gradient owns.
+    EmitPreservedStyledLine(
+        text,
+        styles,
+        LearnedOverrideSpans(text, fields)
+    )
+end
+
+function ColourStats(name, line, wildcards)
+    -- If the learned gradient already owns this line, do not redraw it a
+    -- second time through the legacy fixed-format trigger.
+    if LearnedLineMatches(line) then
+        return
+    end
+
+    -- Match broadly at the trigger layer, then parse the actual visible line here.
+    -- This keeps the portable colouring tolerant of harmless spacing changes in
+    -- the MUD prompt while still failing open if the format changes materially.
+    local lead, open, hpLabel, hpCurrent, hpSlash, hpMax,
+          mpLabel, mpCurrent, mpSlash, mpMax, close, trail =
+        tostring(line or ""):match(
+            "^(%s*)(<<)(HP:%s*)(%d+)(/)(%d+)(%s*MP:%s*)(%d+)(/)(%d+)(>>)(%s*)$"
+        )
+
+    if not open then
+        Note(line or "")
+        return
+    end
+
+    local hpColour = HPGradient(SafePercent(hpCurrent, hpMax))
+    local mpColour = MPGradient(SafePercent(mpCurrent, mpMax))
+
+    ColourTell("white", "", lead or "")
+    ColourTell("green", "", open)
+    ColourTell("white", "", hpLabel)
+    ColourTell(hpColour, "", hpCurrent)
+    ColourTell("white", "", hpSlash)
+    ColourTell(hpColour, "", hpMax)
+    ColourTell("white", "", mpLabel)
+    ColourTell(mpColour, "", mpCurrent)
+    ColourTell("white", "", mpSlash)
+    ColourTell(mpColour, "", mpMax)
+    ColourTell("green", "", close)
+    ColourTell("white", "", trail or "")
     Note("")
 end
 
 function ColourCondition(name, line, wildcards)
-    local hpColour = HPGradient(tonumber(wildcards[3]) or 0)
-    local spColour = MPGradient(tonumber(wildcards[5]) or 0)
+    -- Learned calibration may deliberately target the condition line itself.
+    -- In that case the dynamic gradient trigger owns the redraw.
+    if LearnedLineMatches(line) then
+        return
+    end
 
-    ColourTell("green", "", wildcards[1] or "<<")
-    Tell(wildcards[2] or "OVERALL CONDITION:<HP:")
-    ColourTell(hpColour, "", wildcards[3] or "")
-    Tell(wildcards[4] or "%> <SP:")
-    ColourTell(spColour, "", wildcards[5] or "")
-    Tell(wildcards[6] or "%> <")
-    ColourTell("red", "", wildcards[7] or "Mob")
-    Tell(wildcards[8] or ": None> ")
-    ColourTell("lightgreen", "", wildcards[9] or "Exp")
-    Tell(wildcards[10] or ":0%")
-    ColourTell("green", "", wildcards[11] or ">>")
+    local lead, open, prefix, hpPercent, hpToSP, spPercent,
+          spToMob, mobLabel, mobTail, expLabel, expTail, close, trail =
+        tostring(line or ""):match(
+            "^(%s*)(<<)(OVERALL CONDITION:%s*<HP:%s*)(%d+)(%%>%s*<SP:%s*)(%d+)(%%>%s*<)(Mob)(:%s*[^>]*>%s*)(Exp)(:%s*[%d%.]+%%%s*)(>>)(%s*)$"
+        )
+
+    if not open then
+        Note(line or "")
+        return
+    end
+
+    local hpColour = HPGradient(tonumber(hpPercent) or 0)
+    local spColour = MPGradient(tonumber(spPercent) or 0)
+
+    ColourTell("white", "", lead or "")
+    ColourTell("green", "", open)
+    ColourTell("white", "", prefix)
+    ColourTell(hpColour, "", hpPercent)
+    ColourTell("white", "", hpToSP)
+    ColourTell(spColour, "", spPercent)
+    ColourTell("white", "", spToMob)
+    ColourTell("#FF0000", "", mobLabel)
+    ColourTell("white", "", mobTail)
+    ColourTell("#90EE90", "", expLabel)
+    ColourTell("white", "", expTail)
+    ColourTell("green", "", close)
+    ColourTell("white", "", trail or "")
     Note("")
 end
 
@@ -219,6 +765,7 @@ local function SetCoreEnabled(enabled)
     coreEnabled = enabled and true or false
     SetVariable("core_enabled", coreEnabled and "true" or "false")
     EnableGroup(CORE_TRIGGER_GROUP, coreEnabled)
+    ApplyLearnedGradientTrigger()
 end
 
 -- Public API used by the suite installer during v1.x -> v2.0 migration.
@@ -236,6 +783,16 @@ end
 function CoreStatusAlias(name, line, wildcards)
     ColourNote(coreEnabled and "lime" or "yellow", "", "[SquareSoft Core] Portable core triggers are " .. (coreEnabled and "ON." or "OFF."))
     ColourNote("gray", "", "  Chakra ready notice: " .. (chakraNoticesEnabled and "ON" or "OFF"))
+    ColourNote(
+        "gray", "",
+        "  Learned HP/MP gradient: " ..
+        ((learnedHP and learnedMP) and
+            ((learnedHP.lineRegex and learnedHP.lineRegex ~= "") and
+                "ACTIVE (stored-line gated)" or
+                "ACTIVE (legacy field-only)")
+            or
+            "built-in only")
+    )
 end
 
 function CoreNoticesAlias(name, line, wildcards)
@@ -245,11 +802,15 @@ function CoreNoticesAlias(name, line, wildcards)
 end
 
 function OnPluginInstall()
+    LoadLearnedGaugeCalibration()
     EnableGroup(CORE_TRIGGER_GROUP, coreEnabled)
+    ApplyLearnedGradientTrigger()
 end
 
 function OnPluginEnable()
+    LoadLearnedGaugeCalibration()
     EnableGroup(CORE_TRIGGER_GROUP, coreEnabled)
+    ApplyLearnedGradientTrigger()
 end
 
 ]]>

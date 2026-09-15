@@ -9,7 +9,7 @@
     language="Lua"
     purpose="Resizable themed cockpit HP and MP gauges"
     date_written="2026-09-06"
-    version="2.0"
+    version="2.16"
     save_state="y"
     >
 
@@ -17,10 +17,14 @@
 <![CDATA[
 USAGE:
 
-  gauges show   : show both gauge windows
-  gauges hide   : hide both gauge windows
+  gauges show          : show both gauge windows
+  gauges hide          : hide both gauge windows
+  gauges setup         : calibrate HP/MP parsing from your own 'hp' output
+  gauges setup status  : show whether a custom calibration is saved
+  gauges setup reset   : forget the custom calibration and use built-in parsing
 
-Automatically updates from lines like:
+Automatically updates from learned HP/MP output, with the original condition-line
+format retained as a built-in fallback. Example fallback line:
   <<OVERALL CONDITION:<HP:100%> <SP:31%><Mob: None> Exp:23.352160%>>
 
 (SP in that line is actually MP, per game's own mislabeling - both
@@ -35,8 +39,20 @@ Modular theme client: colours are supplied by UI_Theme_Controller v2.0 when avai
 
 <triggers>
     <trigger
+    name="Gauge_Login_HPBar_Request"
+    script="OnLoginEntry"
+    match="^You enter The UnOfficial SquareSoft MUD\.$"
+    regexp="y"
+    ignore_case="n"
+    enabled="y"
+    omit_from_output="n"
+    keep_evaluating="y"
+    sequence="60"
+    ></trigger>
+
+    <trigger
     script="OnConditionLine"
-    match="^\s*&lt;&lt;OVERALL CONDITION:&lt;HP:\s*(\d+)%&gt;\s*&lt;SP:\s*(\d+)%&gt;&lt;Mob:\s*([^&gt;]*)&gt;\s*Exp:\s*([\d.]+)%&gt;&gt;$"
+    match="^\s*&lt;&lt;OVERALL CONDITION:.*&gt;&gt;\s*$"
     regexp="y"
     ignore_case="y"
     enabled="y"
@@ -59,6 +75,15 @@ Modular theme client: colours are supplied by UI_Theme_Controller v2.0 when avai
     <alias
     script="gauges_hide"
     match="^gauges hide$"
+    regexp="y"
+    ignore_case="y"
+    enabled="y"
+    sequence="100"
+    ></alias>
+
+    <alias
+    script="gauges_setup"
+    match="^gauges setup(?:\s+(status|reset))?$"
     regexp="y"
     ignore_case="y"
     enabled="y"
@@ -141,17 +166,22 @@ BODY_FONT_SIZE = 12
 THEME_CONTROLLER_ID =
     "43c8d047be7a418ba5e86916"
 
+CORE_TRIGGERS_ID =
+    "f3a9c2e71b4d4068a5c912ef"
+
 THEME_BROADCAST_MESSAGE = 9042
 
 --------------------------------------------------
--- AUTHORITATIVE HP PERCENT BROADCAST
+-- HP PERCENT FALLBACK BROADCAST
 --
--- The Theme Controller listens to this instead of parsing the
--- condition line a second time.
+-- The Theme Controller now observes the condition line directly so alert
+-- themes do not depend on this window plugin. This broadcast remains as a
+-- secondary/fallback source and for other consumers.
 --------------------------------------------------
 
+-- 9043 is reserved for World Map state; 9044 is enemy snapshots.
 HP_PERCENT_BROADCAST_MESSAGE =
-    9043
+    9045
 
 
 --------------------------------------------------
@@ -1043,12 +1073,1673 @@ function DrawGauge(win, label, percent, stops)
     Redraw()
 end
 
+
+--------------------------------------------------
+-- PORTABLE HP / MP CALIBRATION
+--
+-- "gauges setup" asks the user to paste the output of the game's "hp"
+-- command, then lets them drag-select the HP entry and MP entry in a
+-- monospaced miniwindow. The generated parsers are data-driven: every
+-- numeric field on the selected sample line becomes a capture, and the
+-- selected capture(s) are remembered as HP or MP. This lets unrelated
+-- changing numbers on the same line vary without breaking the parser.
+--------------------------------------------------
+
+SetupWin = PluginID .. "_gauge_setup"
+SETUP_FONT_ID = "setup_text"
+SETUP_TITLE_FONT_ID = "setup_title"
+SETUP_TEXT_LEFT = 14
+SETUP_TEXT_TOP = 62
+SETUP_BOTTOM_AREA = 72
+SETUP_MIN_WIDTH = 560
+SETUP_MAX_WIDTH = 1050
+SETUP_MAX_LINES = 26
+
+setupState = nil
+learnedHPSpec = nil
+learnedMPSpec = nil
+
+local function ReadCalibrationSpec(kind)
+    local prefix = "gauge_cal_" .. kind .. "_"
+    local pattern = GetVariable(prefix .. "pattern")
+    local mode = GetVariable(prefix .. "mode")
+    local idx1 = tonumber(GetVariable(prefix .. "idx1"))
+    local idx2 = tonumber(GetVariable(prefix .. "idx2"))
+    local idx3 = tonumber(GetVariable(prefix .. "idx3"))
+    local regex = GetVariable(prefix .. "regex")
+    local linePattern = GetVariable(prefix .. "line_pattern")
+    local lineRegex = GetVariable(prefix .. "line_regex")
+
+    if not pattern or pattern == "" or not mode or not idx1 then
+        return nil
+    end
+
+    if mode ~= "percent" and
+       mode ~= "currentmax" and
+       mode ~= "currentmax_percent"
+    then
+        return nil
+    end
+
+    if (mode == "currentmax" or mode == "currentmax_percent") and not idx2 then
+        return nil
+    end
+
+    return {
+        pattern = pattern,
+        mode = mode,
+        idx1 = idx1,
+        idx2 = idx2,
+        idx3 = idx3,
+        regex = regex,
+        linePattern = linePattern,
+        lineRegex = lineRegex
+    }
+end
+
+local function WriteCalibrationSpec(kind, spec)
+    local prefix = "gauge_cal_" .. kind .. "_"
+    SetVariable(prefix .. "pattern", tostring(spec.pattern or ""))
+    SetVariable(prefix .. "mode", tostring(spec.mode or ""))
+    SetVariable(prefix .. "idx1", tostring(spec.idx1 or ""))
+    SetVariable(prefix .. "idx2", tostring(spec.idx2 or ""))
+    SetVariable(prefix .. "idx3", tostring(spec.idx3 or ""))
+    SetVariable(prefix .. "regex", tostring(spec.regex or ""))
+    SetVariable(prefix .. "line_pattern", tostring(spec.linePattern or ""))
+    SetVariable(prefix .. "line_regex", tostring(spec.lineRegex or ""))
+end
+
+
+local function ReadCalibrationReference(kind)
+    local prefix = "gauge_cal_ref_" .. kind .. "_"
+    local line = tonumber(GetVariable(prefix .. "line"))
+    local selectFirst = tonumber(GetVariable(prefix .. "select_first"))
+    local selectLast = tonumber(GetVariable(prefix .. "select_last"))
+    local fieldFirst = tonumber(GetVariable(prefix .. "field_first"))
+    local fieldLast = tonumber(GetVariable(prefix .. "field_last"))
+    local fieldText = GetVariable(prefix .. "field_text")
+
+    if not line or not selectFirst or not selectLast then
+        return nil
+    end
+
+    return {
+        line = line,
+        selectFirst = selectFirst,
+        selectLast = selectLast,
+        fieldFirst = fieldFirst,
+        fieldLast = fieldLast,
+        fieldText = fieldText
+    }
+end
+
+local function WriteCalibrationReference(kind, ref)
+    local prefix = "gauge_cal_ref_" .. kind .. "_"
+    ref = ref or {}
+
+    SetVariable(prefix .. "line", tostring(ref.line or ""))
+    SetVariable(prefix .. "select_first", tostring(ref.selectFirst or ""))
+    SetVariable(prefix .. "select_last", tostring(ref.selectLast or ""))
+    SetVariable(prefix .. "field_first", tostring(ref.fieldFirst or ""))
+    SetVariable(prefix .. "field_last", tostring(ref.fieldLast or ""))
+    SetVariable(prefix .. "field_text", tostring(ref.fieldText or ""))
+end
+
+local function HasStoredCalibrationReference()
+    return
+        tostring(GetVariable("gauge_cal_reference_version") or "") ~= "" and
+        tostring(GetVariable("gauge_cal_sample") or "") ~= "" and
+        ReadCalibrationReference("hp") ~= nil and
+        ReadCalibrationReference("mp") ~= nil
+end
+
+local function ClearCalibrationVariables()
+    for _, kind in ipairs({"hp", "mp"}) do
+        local prefix = "gauge_cal_" .. kind .. "_"
+        SetVariable(prefix .. "pattern", "")
+        SetVariable(prefix .. "mode", "")
+        SetVariable(prefix .. "idx1", "")
+        SetVariable(prefix .. "idx2", "")
+        SetVariable(prefix .. "idx3", "")
+        SetVariable(prefix .. "regex", "")
+        SetVariable(prefix .. "line_pattern", "")
+        SetVariable(prefix .. "line_regex", "")
+
+        WriteCalibrationReference(kind, nil)
+    end
+
+    SetVariable("gauge_cal_sample", "")
+    SetVariable("gauge_cal_reference_version", "")
+    SetVariable("gauge_calibrated", "0")
+end
+
+function LoadGaugeCalibration()
+    -- The pasted sample + selected HP/MP locations are the canonical
+    -- calibration record. Generated patterns are derived data and can be
+    -- rebuilt when parser logic improves in a future plugin version.
+    if HasStoredCalibrationReference() and
+       type(RebuildGaugeCalibrationFromReference) == "function"
+    then
+        local hpSpec, mpSpec =
+            RebuildGaugeCalibrationFromReference()
+
+        if hpSpec and mpSpec then
+            learnedHPSpec = hpSpec
+            learnedMPSpec = mpSpec
+            WriteCalibrationSpec("hp", learnedHPSpec)
+            WriteCalibrationSpec("mp", learnedMPSpec)
+            return true
+        end
+    end
+
+    -- Backward compatibility for calibrations saved before v2.11, when the
+    -- original pasted sample was discarded after generating parser patterns.
+    learnedHPSpec = ReadCalibrationSpec("hp")
+    learnedMPSpec = ReadCalibrationSpec("mp")
+
+    if not learnedHPSpec or not learnedMPSpec then
+        learnedHPSpec = nil
+        learnedMPSpec = nil
+        return false
+    end
+
+    -- Regex migration is applied by SyncGaugeCalibrationToCore(), which is
+    -- defined later in the script and runs immediately after calibration load.
+    return true
+end
+
+local function ReplacePlain(text, oldText, newText)
+    text = tostring(text or "")
+    oldText = tostring(oldText or "")
+    if oldText == "" then return text end
+
+    local out = {}
+    local pos = 1
+
+    while true do
+        local s, e = text:find(oldText, pos, true)
+        if not s then
+            out[#out + 1] = text:sub(pos)
+            break
+        end
+
+        out[#out + 1] = text:sub(pos, s - 1)
+        out[#out + 1] = newText
+        pos = e + 1
+    end
+
+    return table.concat(out)
+end
+
+local function LuaFieldPatternToRegex(pattern)
+    local regex = tostring(pattern or "")
+
+    regex = ReplacePlain(
+        regex,
+        "([%d,]+%.?%d*)",
+        "([0-9,]+(?:\\.[0-9]+)?)"
+    )
+    regex = ReplacePlain(regex, "%s*", "\\s*")
+    regex = ReplacePlain(regex, "%s+", "\\s+")
+
+    -- Remaining Lua %-escapes are literal punctuation. Translate those to
+    -- PCRE backslash escapes for the core plugin's dynamic trigger.
+    local out = {}
+    local i = 1
+
+    while i <= #regex do
+        local ch = regex:sub(i, i)
+
+        if ch == "%" and i < #regex then
+            out[#out + 1] = "\\" .. regex:sub(i + 1, i + 1)
+            i = i + 2
+        else
+            out[#out + 1] = ch
+            i = i + 1
+        end
+    end
+
+    return table.concat(out)
+end
+
+local function LuaLinePatternToRegex(pattern)
+    local regex = tostring(pattern or "")
+
+    regex = ReplacePlain(
+        regex,
+        "%d[%d,]*%.?%d*",
+        "[0-9][0-9,]*(?:\\.[0-9]+)?"
+    )
+    regex = ReplacePlain(
+        regex,
+        "%a[%w_%-]*",
+        "[A-Za-z][A-Za-z0-9_-]*"
+    )
+    regex = ReplacePlain(regex, "%s+", "\\s+")
+
+    local out = {}
+    local i = 1
+
+    while i <= #regex do
+        local ch = regex:sub(i, i)
+
+        if ch == "%" and i < #regex then
+            out[#out + 1] = "\\" .. regex:sub(i + 1, i + 1)
+            i = i + 2
+        else
+            out[#out + 1] = ch
+            i = i + 1
+        end
+    end
+
+    return table.concat(out)
+end
+
+local function EnsureSpecRegex(spec)
+    if not spec then return nil end
+
+    if not spec.regex or spec.regex == "" then
+        spec.regex = LuaFieldPatternToRegex(spec.pattern)
+    end
+
+    if spec.linePattern and spec.linePattern ~= "" and
+       (not spec.lineRegex or spec.lineRegex == "")
+    then
+        spec.lineRegex =
+            LuaLinePatternToRegex(
+                spec.linePattern
+            )
+    end
+
+    return spec
+end
+
+local function SyncGaugeCalibrationToCore()
+    if PluginSupports(CORE_TRIGGERS_ID, "SetGaugeCalibration") ~= error_code.eOK then
+        return false
+    end
+
+    if not learnedHPSpec or not learnedMPSpec then
+        CallPlugin(CORE_TRIGGERS_ID, "ClearGaugeCalibration")
+        return false
+    end
+
+    EnsureSpecRegex(learnedHPSpec)
+    EnsureSpecRegex(learnedMPSpec)
+
+    local rc = CallPlugin(
+        CORE_TRIGGERS_ID,
+        "SetGaugeCalibration",
+        tostring(learnedHPSpec.pattern or ""),
+        tostring(learnedHPSpec.mode or ""),
+        tostring(learnedHPSpec.regex or ""),
+        tostring(learnedMPSpec.pattern or ""),
+        tostring(learnedMPSpec.mode or ""),
+        tostring(learnedMPSpec.regex or ""),
+        tostring(learnedHPSpec.lineRegex or ""),
+        tostring(learnedMPSpec.lineRegex or "")
+    )
+
+    return rc == error_code.eOK
+end
+
+local function SaveGaugeCalibration(
+    hpSpec,
+    mpSpec,
+    sample,
+    hpReference,
+    mpReference
+)
+    -- Preserve the user's original example and selections. This is the durable
+    -- source of truth: if our parser improves later, we can regenerate the
+    -- patterns without asking the user what HP/MP looked like again.
+    if sample and hpReference and mpReference then
+        SetVariable(
+            "gauge_cal_sample",
+            tostring(sample):gsub("\r\n", "\n"):gsub("\r", "\n")
+        )
+        SetVariable("gauge_cal_reference_version", "1")
+        WriteCalibrationReference("hp", hpReference)
+        WriteCalibrationReference("mp", mpReference)
+    end
+
+    SetVariable("gauge_calibrated", "1")
+    learnedHPSpec = EnsureSpecRegex(hpSpec)
+    learnedMPSpec = EnsureSpecRegex(mpSpec)
+    WriteCalibrationSpec("hp", learnedHPSpec)
+    WriteCalibrationSpec("mp", learnedMPSpec)
+    SyncGaugeCalibrationToCore()
+    pcall(SaveState)
+end
+
+local function EscapeLuaPatternLiteral(text)
+    text = tostring(text or "")
+    local out = {}
+    local i = 1
+
+    while i <= #text do
+        local ch = text:sub(i, i)
+
+        if ch:match("%s") then
+            while i <= #text and text:sub(i, i):match("%s") do
+                i = i + 1
+            end
+            out[#out + 1] = "%s+"
+        else
+            if ch:match("[%(%)%.%%%+%-%*%?%[%]%^%$]") then
+                out[#out + 1] = "%" .. ch
+            else
+                out[#out + 1] = ch
+            end
+            i = i + 1
+        end
+    end
+
+    return table.concat(out)
+end
+
+local function BuildReferenceLinePattern(line)
+    line = tostring(line or "")
+    local out = {"^"}
+    local i = 1
+
+    while i <= #line do
+        local ch = line:sub(i, i)
+
+        if ch:match("%d") then
+            local s, e = line:find("%d[%d,]*%.?%d*", i)
+            out[#out + 1] = "%d[%d,]*%.?%d*"
+            i = e + 1
+
+        elseif ch:match("%s") then
+            while i <= #line and line:sub(i, i):match("%s") do
+                i = i + 1
+            end
+            out[#out + 1] = "%s+"
+
+        elseif ch:match("[%a_]") then
+            local s, e = line:find("[%a_][%w_%-]*", i)
+            local token = line:sub(s, e)
+            local look = e + 1
+
+            while look <= #line and line:sub(look, look):match("%s") do
+                look = look + 1
+            end
+
+            local nextChar = line:sub(look, look)
+            local prevChar = s > 1 and line:sub(s - 1, s - 1) or ""
+            local bracketHasNumber = false
+
+            if prevChar == "[" then
+                local close = line:find("]", e + 1, true)
+                if close then
+                    bracketHasNumber =
+                        line:sub(e + 1, close - 1):find("%d") ~= nil
+                end
+            end
+
+            if nextChar == ":" or bracketHasNumber then
+                -- Labels such as HP:, MP:, XP:, or [HP ...] are structural.
+                out[#out + 1] = EscapeLuaPatternLiteral(token)
+            else
+                -- Ordinary textual values are allowed to change (None, Green,
+                -- status names, etc.) while punctuation/field layout remains.
+                out[#out + 1] = "%a[%w_%-]*"
+            end
+
+            i = e + 1
+
+        else
+            out[#out + 1] = EscapeLuaPatternLiteral(ch)
+            i = i + 1
+        end
+    end
+
+    out[#out + 1] = "$"
+    return table.concat(out)
+end
+
+local function BuildNumericLinePattern(line)
+    line = tostring(line or "")
+    local tokens = {}
+    local pieces = {"^"}
+    local pos = 1
+    local captureIndex = 0
+
+    while pos <= #line do
+        local s, e = line:find("%d[%d,]*%.?%d*", pos)
+        if not s then
+            break
+        end
+
+        pieces[#pieces + 1] = EscapeLuaPatternLiteral(line:sub(pos, s - 1))
+        pieces[#pieces + 1] = "([%d,]+%.?%d*)"
+
+        captureIndex = captureIndex + 1
+        tokens[#tokens + 1] = {
+            startPos = s,
+            endPos = e,
+            capture = captureIndex
+        }
+
+        pos = e + 1
+    end
+
+    pieces[#pieces + 1] = EscapeLuaPatternLiteral(line:sub(pos))
+    pieces[#pieces + 1] = "$"
+
+    return table.concat(pieces), tokens
+end
+
+local function NumberFromCapture(value)
+    value = tostring(value or ""):gsub(",", "")
+    return tonumber(value)
+end
+
+local function PercentFromSpec(spec, line)
+    if not spec or not line then
+        return nil
+    end
+
+    -- A learned field is only valid on the status-line shape captured during
+    -- calibration. This prevents HP-like text elsewhere in game output from
+    -- updating gauges or activating gradients.
+    if spec.linePattern and spec.linePattern ~= "" and
+       not tostring(line):match(spec.linePattern)
+    then
+        return nil
+    end
+
+    local captures = { tostring(line):match(spec.pattern) }
+    if #captures == 0 then
+        return nil
+    end
+
+    local first = NumberFromCapture(captures[spec.idx1])
+    if not first then
+        return nil
+    end
+
+    if spec.mode == "percent" then
+        return math.max(0, math.min(100, first))
+    end
+
+    local maximum = NumberFromCapture(captures[spec.idx2])
+    if not maximum or maximum <= 0 then
+        return nil
+    end
+
+    return math.max(0, math.min(100, (first / maximum) * 100))
+end
+
+local function LocalFieldPattern(line, firstToken, secondToken, mode)
+    local beforeStart = math.max(1, firstToken.startPos - 40)
+    local before = line:sub(beforeStart, firstToken.startPos - 1)
+
+    -- Prefer a nearby textual label (HP:, SP:, MP=, etc.). This keeps the
+    -- learned parser independent from unrelated changing text elsewhere on
+    -- the same status line.
+    local labelWord, separator =
+        before:match("([%a_][%w_%-]*)%s*([:=])%s*$")
+    local spaceLabel =
+        before:match("([%a_][%w_%-]*)%s+$")
+    local prefix
+
+    if labelWord and separator then
+        prefix =
+            EscapeLuaPatternLiteral(labelWord) ..
+            "%s*" ..
+            EscapeLuaPatternLiteral(separator) ..
+            "%s*"
+    elseif spaceLabel then
+        prefix =
+            EscapeLuaPatternLiteral(spaceLabel) ..
+            "%s+"
+    else
+        -- Fallback for unusually unlabeled bars: retain only a small amount of
+        -- immediate local context instead of anchoring to the whole line.
+        local fallback = before:sub(math.max(1, #before - 11))
+        prefix = EscapeLuaPatternLiteral(fallback)
+    end
+
+    if mode == "currentmax_percent" then
+        return prefix ..
+            "([%d,]+%.?%d*)%s*/%s*([%d,]+%.?%d*)%s*:%s*([%d,]+%.?%d*)%s*%%"
+    end
+
+    if mode == "currentmax" then
+        return prefix ..
+            "([%d,]+%.?%d*)%s*/%s*([%d,]+%.?%d*)"
+    end
+
+    return prefix ..
+        "([%d,]+%.?%d*)%s*%%"
+end
+
+local function EnclosingBracketField(line, selectionStart, selectionEnd)
+    line = tostring(line or "")
+
+    if not selectionStart or not selectionEnd then
+        return nil
+    end
+
+    if selectionEnd < selectionStart then
+        selectionStart, selectionEnd = selectionEnd, selectionStart
+    end
+
+    -- Find the nearest '[' at OR BEFORE the start of the user's drag.
+    -- The previous implementation stopped when '[' == selectionStart, which
+    -- meant dragging from the opening bracket of [MP ...] could accidentally
+    -- reuse the preceding [HP ...] bracket.
+    local left = nil
+    local search = 1
+
+    while true do
+        local p = line:find("[", search, true)
+        if not p or p > selectionStart then break end
+        left = p
+        search = p + 1
+    end
+
+    if not left then
+        return nil
+    end
+
+    -- Pair that opening bracket with its OWN next closing bracket, then require
+    -- the complete user selection to be inside that one field. Never span two
+    -- sibling fields such as [HP ...] [MP ...].
+    local right = line:find("]", left + 1, true)
+    if not right then
+        return nil
+    end
+
+    if selectionStart < left or selectionEnd > (right + 1) then
+        return nil
+    end
+
+    local nested = line:find("[", left + 1, true)
+    if nested and nested < right then
+        return nil
+    end
+
+    return left, right + 1
+end
+
+local function LabeledFieldRange(line, selectionStart, selectionEnd)
+    line = tostring(line or "")
+
+    if not selectionStart or not selectionEnd then
+        return nil
+    end
+
+    if selectionEnd < selectionStart then
+        selectionStart, selectionEnd = selectionEnd, selectionStart
+    end
+
+    local labels = {}
+    local search = 1
+
+    while search <= #line do
+        local s, e =
+            line:find(
+                "[%a_][%w_%-]*%s*:",
+                search
+            )
+
+        if not s then break end
+
+        labels[#labels + 1] = {
+            startPos = s,
+            endPos = e
+        }
+
+        search = e + 1
+    end
+
+    local chosenIndex = nil
+
+    for i, label in ipairs(labels) do
+        -- Prefer the label at/before the literal drag. Also allow the drag to
+        -- begin just before the label itself.
+        if label.startPos <= selectionStart then
+            chosenIndex = i
+        elseif not chosenIndex and
+               label.startPos <= selectionEnd
+        then
+            chosenIndex = i
+            break
+        else
+            break
+        end
+    end
+
+    if not chosenIndex then
+        return nil
+    end
+
+    local chosen = labels[chosenIndex]
+    local nextLabel = labels[chosenIndex + 1]
+
+    local fieldEnd =
+        nextLabel and
+        nextLabel.startPos or
+        (#line + 1)
+
+    -- Trim whitespace immediately before the next label/end of line.
+    while fieldEnd > chosen.startPos and
+          line:sub(fieldEnd - 1, fieldEnd - 1):match("%s")
+    do
+        fieldEnd = fieldEnd - 1
+    end
+
+    if selectionStart < chosen.startPos or
+       selectionEnd > fieldEnd
+    then
+        return nil
+    end
+
+    return chosen.startPos, fieldEnd
+end
+
+local function SemanticFieldRange(line, selectionStart, selectionEnd)
+    local bracketFirst, bracketLast =
+        EnclosingBracketField(
+            line,
+            selectionStart,
+            selectionEnd
+        )
+
+    if bracketFirst and bracketLast then
+        local inside =
+            tostring(line or ""):sub(
+                bracketFirst + 1,
+                bracketLast - 2
+            )
+
+        -- A bracket is a whole semantic field only when it looks like one,
+        -- eg. [HP 11061/11061: 100%]. A bare sub-value such as [100%]
+        -- belongs to the surrounding HP:/MP: labelled field instead.
+        local bracketHasLabel =
+            inside:match(
+                "^%s*[%a_][%w_%-]*%s+"
+            ) ~= nil
+
+        if bracketHasLabel then
+            return bracketFirst, bracketLast
+        end
+    end
+
+    -- Prefer the nearest labelled field for layouts such as:
+    -- HP: 11061(11061) [100%] MP: 1013(1126) [89%]
+    local first, last =
+        LabeledFieldRange(
+            line,
+            selectionStart,
+            selectionEnd
+        )
+
+    if first and last then
+        return first, last
+    end
+
+    -- If there is no surrounding label, an ordinary bracketed value remains
+    -- a reasonable field boundary.
+    if bracketFirst and bracketLast then
+        return bracketFirst, bracketLast
+    end
+
+    -- Last resort: the user's literal drag is itself the field.
+    return selectionStart, selectionEnd
+end
+
+local function NumericTokensInRange(line, rangeStart, rangeEnd)
+    local tokens = {}
+    local pos = rangeStart
+    local capture = 0
+
+    while pos < rangeEnd do
+        local s, e =
+            tostring(line or ""):find(
+                "%d[%d,]*%.?%d*",
+                pos
+            )
+
+        if not s or s >= rangeEnd then
+            break
+        end
+
+        capture = capture + 1
+        tokens[#tokens + 1] = {
+            startPos = s,
+            endPos = e,
+            capture = capture
+        }
+
+        pos = e + 1
+    end
+
+    return tokens
+end
+
+local function TokenIsDisplayedPercent(line, token, rangeEnd)
+    if not token then return false end
+
+    local after =
+        tostring(line or ""):sub(
+            token.endPos + 1,
+            math.min(
+                tonumber(rangeEnd or (#line + 1)) - 1,
+                token.endPos + 4
+            )
+        )
+
+    return after:match("^%s*%%") ~= nil
+end
+
+local function FieldPatternFromRange(
+    line,
+    rangeStart,
+    rangeEnd,
+    targetTokens
+)
+    local targetByStart = {}
+    for _, token in ipairs(targetTokens or {}) do
+        targetByStart[token.startPos] = true
+    end
+
+    local out = {}
+    local pos = rangeStart
+
+    while pos < rangeEnd do
+        local s, e = line:find("%d[%d,]*%.?%d*", pos)
+
+        if not s or s >= rangeEnd then
+            out[#out + 1] =
+                EscapeLuaPatternLiteral(
+                    line:sub(pos, rangeEnd - 1)
+                )
+            break
+        end
+
+        out[#out + 1] =
+            EscapeLuaPatternLiteral(
+                line:sub(pos, s - 1)
+            )
+
+        if targetByStart[s] then
+            out[#out + 1] =
+                "([%d,]+%.?%d*)"
+        else
+            -- Other changing numbers inside the same field remain dynamic,
+            -- but do not become captures that could shift HP/MP indexes.
+            out[#out + 1] =
+                "[%d,]+%.?%d*"
+        end
+
+        pos = e + 1
+    end
+
+    return table.concat(out)
+end
+
+local function SpecModeName(mode)
+    if mode == "currentmax_percent" then
+        return "current/max + displayed percent"
+    elseif mode == "currentmax" then
+        return "current/max"
+    end
+    return "percent"
+end
+
+local function InferSpecFromSelection(line, selectionStart, selectionEnd)
+    if not line or not selectionStart or not selectionEnd then
+        return nil, "Drag across the HP or MP field first."
+    end
+
+    if selectionEnd < selectionStart then
+        selectionStart, selectionEnd = selectionEnd, selectionStart
+    end
+
+    if selectionEnd <= selectionStart then
+        return nil, "Select at least one numeric value."
+    end
+
+    local fieldStart, fieldEnd =
+        SemanticFieldRange(
+            line,
+            selectionStart,
+            selectionEnd
+        )
+
+    local fieldText =
+        tostring(line or ""):sub(
+            fieldStart,
+            fieldEnd - 1
+        )
+
+    local tokens =
+        NumericTokensInRange(
+            line,
+            fieldStart,
+            fieldEnd
+        )
+
+    if #tokens == 0 then
+        return nil, "The selected field does not contain a number."
+    end
+
+    local percentIndex = nil
+
+    for i = #tokens, 1, -1 do
+        if TokenIsDisplayedPercent(
+            line,
+            tokens[i],
+            fieldEnd
+        ) then
+            percentIndex = i
+            break
+        end
+    end
+
+    local mode
+    local targetTokens = {}
+    local idx1, idx2, idx3
+
+    if #tokens >= 2 then
+        -- Because the user explicitly identified this field as HP or MP, the
+        -- first two numeric components are treated as current/max regardless
+        -- of presentation punctuation: 100/200, 100(200), 100 [200], etc.
+        mode = percentIndex and
+            "currentmax_percent" or
+            "currentmax"
+
+        targetTokens[1] = tokens[1]
+        targetTokens[2] = tokens[2]
+        idx1 = 1
+        idx2 = 2
+
+        if percentIndex and percentIndex > 2 then
+            targetTokens[3] = tokens[percentIndex]
+            idx3 = 3
+        elseif percentIndex == 2 then
+            -- A two-number field where the second is explicitly a percentage
+            -- is more plausibly "current + displayed percent" than current/max.
+            -- In that uncommon layout, use the displayed percent directly.
+            mode = "percent"
+            targetTokens = {tokens[2]}
+            idx1 = 1
+            idx2 = nil
+            idx3 = nil
+        end
+    elseif percentIndex == 1 then
+        mode = "percent"
+        targetTokens = {tokens[1]}
+        idx1 = 1
+    else
+        return nil,
+            "Select an HP/MP field containing current/max values or a displayed percentage."
+    end
+
+    local pattern =
+        FieldPatternFromRange(
+            line,
+            fieldStart,
+            fieldEnd,
+            targetTokens
+        )
+
+    return {
+        pattern = pattern,
+        regex = nil,
+        linePattern = BuildReferenceLinePattern(line),
+        lineRegex = nil,
+        mode = mode,
+        idx1 = idx1,
+        idx2 = idx2,
+        idx3 = idx3,
+        field = fieldText,
+        fieldStart = fieldStart,
+        fieldEnd = fieldEnd,
+        numericCount = #tokens
+    }, nil
+end
+
+local function SplitSetupLines(text)
+    text = tostring(text or ""):gsub("\r\n", "\n"):gsub("\r", "\n")
+    local lines = {}
+
+    for line in (text .. "\n"):gmatch("(.-)\n") do
+        lines[#lines + 1] = line
+    end
+
+    while #lines > 1 and lines[#lines] == "" do
+        table.remove(lines)
+    end
+
+    return lines
+end
+
+function RebuildGaugeCalibrationFromReference()
+    local sample = tostring(GetVariable("gauge_cal_sample") or "")
+    local hpReference = ReadCalibrationReference("hp")
+    local mpReference = ReadCalibrationReference("mp")
+
+    if sample == "" or not hpReference or not mpReference then
+        return nil, nil
+    end
+
+    local lines = SplitSetupLines(sample)
+    local hpLine = lines[hpReference.line]
+    local mpLine = lines[mpReference.line]
+
+    if not hpLine or not mpLine then
+        return nil, nil
+    end
+
+    -- The ORIGINAL user drag is canonical. Semantic field boundaries are
+    -- derived data and are intentionally re-inferred every time, so a bug fix
+    -- in bracket/field detection can repair an existing saved calibration.
+    local hpSpec =
+        InferSpecFromSelection(
+            hpLine,
+            hpReference.selectFirst,
+            hpReference.selectLast
+        )
+    local mpSpec =
+        InferSpecFromSelection(
+            mpLine,
+            mpReference.selectFirst,
+            mpReference.selectLast
+        )
+
+    return hpSpec, mpSpec
+end
+
+local function SetupMouseRelativeFromDrag()
+    local mx = tonumber(WindowInfo(SetupWin, 17))
+    local my = tonumber(WindowInfo(SetupWin, 18))
+    local left = tonumber(WindowInfo(SetupWin, 10)) or 0
+    local top = tonumber(WindowInfo(SetupWin, 11)) or 0
+
+    if not mx or not my then
+        return nil, nil
+    end
+
+    return mx - left, my - top
+end
+
+local function SetupPointFromPixels(x, y)
+    if not setupState or not x or not y then
+        return nil
+    end
+
+    local lineHeight = setupState.lineHeight
+    local lineIndex = math.floor((y - SETUP_TEXT_TOP) / lineHeight) + 1
+    lineIndex = math.max(1, math.min(#setupState.lines, lineIndex))
+
+    local line = setupState.lines[lineIndex] or ""
+    local charIndex = math.floor((x - SETUP_TEXT_LEFT) / setupState.charWidth) + 1
+    charIndex = math.max(1, math.min(#line + 1, charIndex))
+
+    return {
+        line = lineIndex,
+        char = charIndex
+    }
+end
+
+local function OrderedSetupSelection()
+    if not setupState or not setupState.selectionStart or not setupState.selectionEnd then
+        return nil
+    end
+
+    local a = setupState.selectionStart
+    local b = setupState.selectionEnd
+
+    if a.line ~= b.line then
+        return nil, "Keep the selection on a single line."
+    end
+
+    local first = math.min(a.char, b.char)
+    local last = math.max(a.char, b.char)
+
+    if first == last then
+        return nil, "Drag across the HP or MP entry."
+    end
+
+    return {
+        line = a.line,
+        first = first,
+        last = last
+    }, nil
+end
+
+local function CurrentSetupReference()
+    local selection, why = OrderedSetupSelection()
+    if not selection then
+        return nil, why
+    end
+
+    local line =
+        setupState and
+        setupState.lines and
+        setupState.lines[selection.line] or
+        ""
+
+    local fieldFirst, fieldLast =
+        SemanticFieldRange(
+            line,
+            selection.first,
+            selection.last
+        )
+
+    return {
+        line = selection.line,
+        selectFirst = selection.first,
+        selectLast = selection.last,
+        -- Retain the inferred field for diagnostics/UI, but never treat it as
+        -- canonical. Future rebuilds always start from selectFirst/selectLast.
+        fieldFirst = fieldFirst,
+        fieldLast = fieldLast,
+        fieldText = line:sub(fieldFirst, fieldLast - 1)
+    }, nil
+end
+
+local function SetupButton(id, label, left, top, right, bottom, callback)
+    WindowRectOp(
+        SetupWin,
+        miniwin.rect_fill,
+        left, top, right, bottom,
+        TITLE_BAR_COLOUR
+    )
+    WindowRectOp(
+        SetupWin,
+        miniwin.rect_frame,
+        left, top, right, bottom,
+        BORDER_COLOUR
+    )
+
+    local w = WindowTextWidth(SetupWin, SETUP_FONT_ID, label, false)
+    local h = tonumber(WindowFontInfo(SetupWin, SETUP_FONT_ID, 1)) or 14
+
+    WindowText(
+        SetupWin,
+        SETUP_FONT_ID,
+        label,
+        left + math.max(4, (right - left - w) / 2),
+        top + math.max(2, (bottom - top - h) / 2),
+        0, 0,
+        TITLE_TEXT_COLOUR,
+        false
+    )
+
+    WindowAddHotspot(
+        SetupWin,
+        id,
+        left, top, right, bottom,
+        "", "", "", "", callback,
+        label,
+        miniwin.cursor_hand,
+        0
+    )
+end
+
+local function DrawGaugeSetupTextArea()
+    if not setupState then
+        return
+    end
+
+    local width = setupState.width
+    local visibleLines = math.min(#setupState.lines, SETUP_MAX_LINES)
+    local textBottom = SETUP_TEXT_TOP + visibleLines * setupState.lineHeight
+
+    -- Repaint only the selectable text area while a drag is active. Do NOT
+    -- delete/recreate hotspots here: replacing the active hotspot during
+    -- mouse-down/drag cancels MUSHclient's WindowDragHandler operation.
+    WindowRectOp(
+        SetupWin,
+        miniwin.rect_fill,
+        SETUP_TEXT_LEFT,
+        SETUP_TEXT_TOP,
+        width - SETUP_TEXT_LEFT,
+        textBottom,
+        BACKGROUND_COLOUR
+    )
+
+    local selection = OrderedSetupSelection()
+
+    for i = 1, visibleLines do
+        local line = setupState.lines[i] or ""
+        local y = SETUP_TEXT_TOP + (i - 1) * setupState.lineHeight
+
+        if selection and selection.line == i then
+            local before = line:sub(1, selection.first - 1)
+            local chosen = line:sub(selection.first, selection.last - 1)
+            local after = line:sub(selection.last)
+
+            local x1 = SETUP_TEXT_LEFT + (#before * setupState.charWidth)
+            local x2 = x1 + (#chosen * setupState.charWidth)
+
+            WindowRectOp(
+                SetupWin,
+                miniwin.rect_fill,
+                x1, y, x2, y + setupState.lineHeight,
+                TITLE_TEXT_COLOUR
+            )
+
+            WindowText(
+                SetupWin, SETUP_FONT_ID, before,
+                SETUP_TEXT_LEFT, y, 0, 0,
+                READOUT_COLOUR, false
+            )
+            WindowText(
+                SetupWin, SETUP_FONT_ID, chosen,
+                x1, y, 0, 0,
+                BACKGROUND_COLOUR, false
+            )
+            WindowText(
+                SetupWin, SETUP_FONT_ID, after,
+                x2, y, 0, 0,
+                READOUT_COLOUR, false
+            )
+        else
+            WindowText(
+                SetupWin,
+                SETUP_FONT_ID,
+                line,
+                SETUP_TEXT_LEFT, y, 0, 0,
+                READOUT_COLOUR,
+                false
+            )
+        end
+    end
+
+    Redraw()
+end
+
+function DrawGaugeSetupWindow()
+    if not setupState then
+        return
+    end
+
+    local width = setupState.width
+    local height = setupState.height
+
+    WindowDeleteAllHotspots(SetupWin)
+    WindowRectOp(SetupWin, miniwin.rect_fill, 0, 0, width, height, BACKGROUND_COLOUR)
+    WindowRectOp(SetupWin, miniwin.rect_frame, 0, 0, 0, 0, BORDER_COLOUR)
+    WindowRectOp(SetupWin, miniwin.rect_fill, 0, 0, width, 24, TITLE_BAR_COLOUR)
+
+    WindowText(
+        SetupWin,
+        SETUP_TITLE_FONT_ID,
+        "HP / MP CALIBRATION",
+        10, 4, 0, 0,
+        TITLE_TEXT_COLOUR,
+        false
+    )
+
+    local instruction
+    if setupState.phase == "hp" then
+        instruction =
+            "Drag across your HP field (the whole [HP ...] block is best), then click OK."
+    else
+        instruction =
+            "Now drag across your MP field (the whole [MP ...] block is best), then click OK."
+    end
+
+    WindowText(
+        SetupWin,
+        SETUP_FONT_ID,
+        instruction,
+        SETUP_TEXT_LEFT, 34, 0, 0,
+        READOUT_COLOUR,
+        false
+    )
+
+    local selection = OrderedSetupSelection()
+    local visibleLines = math.min(#setupState.lines, SETUP_MAX_LINES)
+
+    for i = 1, visibleLines do
+        local line = setupState.lines[i] or ""
+        local y = SETUP_TEXT_TOP + (i - 1) * setupState.lineHeight
+
+        if selection and selection.line == i then
+            local before = line:sub(1, selection.first - 1)
+            local chosen = line:sub(selection.first, selection.last - 1)
+            local after = line:sub(selection.last)
+
+            local x1 = SETUP_TEXT_LEFT + (#before * setupState.charWidth)
+            local x2 = x1 + (#chosen * setupState.charWidth)
+
+            WindowRectOp(
+                SetupWin,
+                miniwin.rect_fill,
+                x1, y, x2, y + setupState.lineHeight,
+                TITLE_TEXT_COLOUR
+            )
+
+            WindowText(SetupWin, SETUP_FONT_ID, before,
+                SETUP_TEXT_LEFT, y, 0, 0, READOUT_COLOUR, false)
+            WindowText(SetupWin, SETUP_FONT_ID, chosen,
+                x1, y, 0, 0, BACKGROUND_COLOUR, false)
+            WindowText(SetupWin, SETUP_FONT_ID, after,
+                x2, y, 0, 0, READOUT_COLOUR, false)
+        else
+            WindowText(
+                SetupWin,
+                SETUP_FONT_ID,
+                line,
+                SETUP_TEXT_LEFT, y, 0, 0,
+                READOUT_COLOUR,
+                false
+            )
+        end
+    end
+
+    local statusY = height - 60
+    WindowText(
+        SetupWin,
+        SETUP_FONT_ID,
+        tostring(setupState.status or ""),
+        SETUP_TEXT_LEFT, statusY, width - 190, 0,
+        setupState.statusError and ALERT_RED or READOUT_COLOUR,
+        false
+    )
+
+    local buttonTop = height - 38
+    SetupButton("setup_ok", "OK", width - 172, buttonTop, width - 92, height - 10, "GaugeSetupAccept")
+    SetupButton("setup_cancel", "Cancel", width - 86, buttonTop, width - 10, height - 10, "GaugeSetupCancel")
+
+    local textBottom = SETUP_TEXT_TOP + visibleLines * setupState.lineHeight
+    WindowAddHotspot(
+        SetupWin,
+        "setup_text_select",
+        SETUP_TEXT_LEFT,
+        SETUP_TEXT_TOP,
+        width - SETUP_TEXT_LEFT,
+        textBottom,
+        "", "",
+        "GaugeSetupMouseDown",
+        "",
+        "",
+        "Drag to select the requested value",
+        miniwin.cursor_ibeam,
+        0
+    )
+    WindowDragHandler(
+        SetupWin,
+        "setup_text_select",
+        "GaugeSetupMouseDrag",
+        "GaugeSetupMouseRelease",
+        0
+    )
+
+    WindowShow(SetupWin, true)
+    Redraw()
+end
+
+function GaugeSetupMouseDown(flags, hotspot_id)
+    if not setupState then
+        return 0
+    end
+
+    -- 14/15 are mouse coordinates relative to the miniwindow for normal
+    -- hotspot events. Keep the existing hotspot installed so the registered
+    -- drag handler can take over once the mouse moves.
+    local x = tonumber(WindowInfo(SetupWin, 14))
+    local y = tonumber(WindowInfo(SetupWin, 15))
+    local point = SetupPointFromPixels(x, y)
+
+    setupState.selectionStart = point
+    setupState.selectionEnd = point
+    setupState.status = ""
+    setupState.statusError = false
+    return 0
+end
+
+function GaugeSetupMouseDrag(flags, hotspot_id)
+    if not setupState or not setupState.selectionStart then
+        return 0
+    end
+
+    -- 17/18 are client/output-window coordinates during WindowDragHandler.
+    -- Convert them back to miniwindow-relative coordinates before mapping the
+    -- mouse to a character.
+    local x, y = SetupMouseRelativeFromDrag()
+    setupState.selectionEnd = SetupPointFromPixels(x, y)
+    DrawGaugeSetupTextArea()
+    SetCursor(miniwin.cursor_ibeam)
+    return 0
+end
+
+function GaugeSetupMouseRelease(flags, hotspot_id)
+    if not setupState or not setupState.selectionStart then
+        return 0
+    end
+
+    local x, y = SetupMouseRelativeFromDrag()
+    setupState.selectionEnd = SetupPointFromPixels(x, y)
+
+    -- The drag is over now, so it is safe for the normal full redraw to
+    -- rebuild hotspots/buttons.
+    DrawGaugeSetupWindow()
+    return 0
+end
+
+local function SetupSpecFromCurrentSelection()
+    local reference, why = CurrentSetupReference()
+    if not reference then
+        return nil, why, nil
+    end
+
+    local line = setupState.lines[reference.line] or ""
+    local spec, inferWhy =
+        InferSpecFromSelection(
+            line,
+            reference.selectFirst,
+            reference.selectLast
+        )
+
+    return spec, inferWhy, reference
+end
+
+local function TestCalibrationAgainstSample(lines, hpSpec, mpSpec)
+    local hp, mp
+
+    for _, line in ipairs(lines or {}) do
+        hp = hp or PercentFromSpec(hpSpec, line)
+        mp = mp or PercentFromSpec(mpSpec, line)
+        if hp and mp then
+            return hp, mp
+        end
+    end
+
+    return hp, mp
+end
+
+function GaugeSetupAccept(flags, hotspot_id)
+    if not setupState then
+        return 0
+    end
+
+    local spec, why, reference = SetupSpecFromCurrentSelection()
+    if not spec then
+        setupState.status = why or "Could not understand that selection."
+        setupState.statusError = true
+        DrawGaugeSetupWindow()
+        return 0
+    end
+
+    if setupState.phase == "hp" then
+        setupState.hpSpec = spec
+        setupState.hpReference = reference
+        setupState.phase = "mp"
+        setupState.selectionStart = nil
+        setupState.selectionEnd = nil
+        setupState.status =
+            "HP learned (" ..
+            SpecModeName(spec.mode) ..
+            "). Select the MP field."
+        setupState.statusError = false
+        DrawGaugeSetupWindow()
+        return 0
+    end
+
+    setupState.mpSpec = spec
+    setupState.mpReference = reference
+
+    local hp, mp = TestCalibrationAgainstSample(
+        setupState.lines,
+        setupState.hpSpec,
+        setupState.mpSpec
+    )
+
+    if not hp or not mp then
+        setupState.status =
+            "The sample could not be parsed with both selections. Try selecting MP again."
+        setupState.statusError = true
+        setupState.mpSpec = nil
+        DrawGaugeSetupWindow()
+        return 0
+    end
+
+    SaveGaugeCalibration(
+        setupState.hpSpec,
+        setupState.mpSpec,
+        setupState.sample,
+        setupState.hpReference,
+        setupState.mpReference
+    )
+
+    WindowShow(SetupWin, false)
+    setupState = nil
+
+    ColourNote(
+        "lime", "",
+        string.format(
+            "[Gauges] Calibration saved. Sample reads HP %.1f%%, MP %.1f%%.",
+            hp, mp
+        )
+    )
+
+    -- Show the learned sample immediately, then ask the game for a live reading.
+    ApplyGaugeReadings(hp, mp)
+    Send("hp")
+    return 0
+end
+
+function GaugeSetupCancel(flags, hotspot_id)
+    if WindowInfo(SetupWin, 5) then
+        WindowShow(SetupWin, false)
+    end
+    setupState = nil
+    ColourNote("yellow", "", "[Gauges] Calibration cancelled.")
+    return 0
+end
+
+function BeginGaugeSetup()
+    local clipboard = ""
+    local ok, value = pcall(GetClipboard)
+    if ok and type(value) == "string" then
+        clipboard = value
+    end
+
+    local sample = utils.editbox(
+        "Type hp in the game, copy the resulting HP/MP output, and paste it below.\n\n" ..
+        "After you click Continue, you will select the HP entry and then the MP entry.",
+        "HP / MP Gauge Setup",
+        clipboard,
+        "Consolas",
+        10,
+        {
+            box_width = 760,
+            box_height = 520,
+            prompt_width = 720,
+            prompt_height = 55,
+            reply_width = 720,
+            reply_height = 370,
+            max_length = 12000,
+            ok_button = "Continue",
+            cancel_button = "Cancel"
+        }
+    )
+
+    if not sample or sample == "" then
+        return
+    end
+
+    local lines = SplitSetupLines(sample)
+    if #lines == 0 then
+        ColourNote("red", "", "[Gauges] Nothing was pasted.")
+        return
+    end
+
+    if #lines > SETUP_MAX_LINES then
+        ColourNote(
+            "yellow", "",
+            "[Gauges] The selector shows the first " ..
+            tostring(SETUP_MAX_LINES) ..
+            " lines. Paste only the relevant hp output if your selection is below that."
+        )
+    end
+
+    check(WindowCreate(
+        SetupWin,
+        0, 0,
+        SETUP_MIN_WIDTH, 240,
+        miniwin.pos_center_all,
+        0,
+        BACKGROUND_COLOUR
+    ))
+    check(WindowFont(SetupWin, SETUP_FONT_ID, "Consolas", 10, false))
+    check(WindowFont(SetupWin, SETUP_TITLE_FONT_ID, "Consolas", 10, true))
+
+    local charWidth =
+        math.max(
+            6,
+            tonumber(WindowTextWidth(SetupWin, SETUP_FONT_ID, "0", false)) or 8
+        )
+    local fontHeight =
+        math.max(
+            12,
+            tonumber(WindowFontInfo(SetupWin, SETUP_FONT_ID, 1)) or 14
+        )
+    local lineHeight = fontHeight + 2
+
+    local longest = 0
+    local visibleLines = math.min(#lines, SETUP_MAX_LINES)
+    for i = 1, visibleLines do
+        longest = math.max(longest, #(lines[i] or ""))
+    end
+
+    local width = math.max(
+        SETUP_MIN_WIDTH,
+        math.min(
+            SETUP_MAX_WIDTH,
+            SETUP_TEXT_LEFT * 2 + longest * charWidth + 10
+        )
+    )
+    local height =
+        SETUP_TEXT_TOP +
+        visibleLines * lineHeight +
+        SETUP_BOTTOM_AREA
+
+    WindowResize(SetupWin, width, height, BACKGROUND_COLOUR)
+    WindowPosition(
+        SetupWin,
+        0, 0,
+        miniwin.pos_center_all,
+        0
+    )
+
+    setupState = {
+        phase = "hp",
+        sample = sample,
+        lines = lines,
+        charWidth = charWidth,
+        lineHeight = lineHeight,
+        width = width,
+        height = height,
+        status = "Select your HP entry.",
+        statusError = false,
+        selectionStart = nil,
+        selectionEnd = nil,
+        hpSpec = nil,
+        mpSpec = nil,
+        hpReference = nil,
+        mpReference = nil
+    }
+
+    DrawGaugeSetupWindow()
+end
+
+function gauges_setup(name, line, wildcards)
+    local command =
+        tostring((wildcards and wildcards[1]) or ""):lower()
+
+    if command == "status" then
+        local configured = LoadGaugeCalibration()
+        local hasReference = HasStoredCalibrationReference()
+        ColourNote(
+            configured and "lime" or "yellow",
+            "",
+            configured
+                and (
+                    "[Gauges] Custom HP/MP calibration is saved. Reference sample: " ..
+                    (hasReference and "stored." or "legacy pattern only; rerun gauges setup once to store it.")
+                )
+                or "[Gauges] No custom calibration saved; using built-in parsing."
+        )
+        return
+    end
+
+    if command == "reset" then
+        ClearCalibrationVariables()
+        learnedHPSpec = nil
+        learnedMPSpec = nil
+        if PluginSupports(CORE_TRIGGERS_ID, "ClearGaugeCalibration") == error_code.eOK then
+            CallPlugin(CORE_TRIGGERS_ID, "ClearGaugeCalibration")
+        end
+        pcall(SaveState)
+        ColourNote(
+            "yellow", "",
+            "[Gauges] Custom HP/MP calibration cleared; built-in parsing restored."
+        )
+        return
+    end
+
+    BeginGaugeSetup()
+end
+
+
 --------------------------------------------------
 -- Trigger handler
 --------------------------------------------------
 
 lastHP = 100
 lastMP = 100
+
+function ApplyGaugeReadings(hp, mp)
+    hp = tonumber(hp)
+    mp = tonumber(mp)
+
+    if not hp and not mp then
+        return false
+    end
+
+    if hp then
+        lastHP = math.max(0, math.min(100, hp))
+        hasHPReading = true
+        DrawGauge(HPWin, "HP", lastHP, HP_STOPS)
+
+        -- Drive alert/warning themes through a direct normalized-HP API so
+        -- plugin reload order or a missed broadcast cannot leave window colours
+        -- stale. Keep the broadcast too for backward compatibility/other users.
+        if PluginSupports(
+            THEME_CONTROLLER_ID,
+            "SetObservedHPPercent"
+        ) == error_code.eOK
+        then
+            CallPlugin(
+                THEME_CONTROLLER_ID,
+                "SetObservedHPPercent",
+                tostring(lastHP)
+            )
+        end
+
+        BroadcastPlugin(
+            HP_PERCENT_BROADCAST_MESSAGE,
+            tostring(lastHP)
+        )
+    end
+
+    if mp then
+        lastMP = math.max(0, math.min(100, mp))
+        DrawGauge(MPWin, "MP", lastMP, MP_STOPS)
+    end
+
+    return true
+end
 
 -- Return only an observed HP value, never the initial display placeholder.
 function GetCurrentHPPercent()
@@ -1058,38 +2749,50 @@ function GetCurrentHPPercent()
     return nil
 end
 
+function OnLoginEntry(name, line, wildcards)
+    -- A reconnect can leave the previous session's last gauge value in memory.
+    -- Mark it stale until the fresh hp response arrives, then request that
+    -- response immediately from the game.
+    hasHPReading = false
+    Send("hp")
+end
+
 function OnConditionLine(name, line, wildcards)
-    local hp = tonumber(wildcards[1])
-    local mp = tonumber(wildcards[2])
-
-    if hp then
-        lastHP = hp
-        hasHPReading = true
-
-        DrawGauge(
-            HPWin,
-            "HP",
-            hp,
-            HP_STOPS
+    -- Parse the actual server line here instead of depending on the trigger's
+    -- wildcard layout. SquareSoft varies harmless spacing around this prompt
+    -- (for example "CONDITION: <HP:" and a space before the final ">>").
+    local hpText, mpText =
+        tostring(line or ""):match(
+            "^%s*<<OVERALL CONDITION:%s*<HP:%s*(%d+)%%>%s*<SP:%s*(%d+)%%>%s*<Mob:%s*[^>]*>%s*Exp:%s*[%d%.]+%%%s*>>%s*$"
         )
 
-        --------------------------------------------------
-        -- Share the exact HP percentage already parsed by this
-        -- proven gauge trigger.
-        --------------------------------------------------
+    local hp = tonumber(hpText)
+    local mp = tonumber(mpText)
 
-        BroadcastPlugin(
-            HP_PERCENT_BROADCAST_MESSAGE,
-            tostring(
-                hp
-            )
-        )
+    if not hp or not mp then
+        return
     end
 
-    if mp then
-        lastMP = mp
-        DrawGauge(MPWin, "MP", mp, MP_STOPS)
+    ApplyGaugeReadings(hp, mp)
+end
+
+function OnPluginLineReceived(line)
+    -- A learned calibration watches ordinary incoming text without owning or
+    -- suppressing it. HP and MP may be on the same line or on separate lines.
+    -- Plugin line callbacks must return true so MUSHclient continues displaying
+    -- the received line.
+    if not learnedHPSpec or not learnedMPSpec then
+        return true
     end
+
+    local hp = PercentFromSpec(learnedHPSpec, line)
+    local mp = PercentFromSpec(learnedMPSpec, line)
+
+    if hp or mp then
+        ApplyGaugeReadings(hp, mp)
+    end
+
+    return true
 end
 
 --------------------------------------------------
@@ -1098,6 +2801,8 @@ end
 
 function OnPluginInstall()
     LoadTheme()
+    LoadGaugeCalibration()
+    SyncGaugeCalibrationToCore()
 
     hpWindowInfo = CreateGaugeWindow(HPWin, miniwin.pos_top_right)
     mpWindowInfo = CreateGaugeWindow(MPWin, miniwin.pos_bottom_right)
@@ -1138,6 +2843,8 @@ end
 
 function OnPluginEnable()
     LoadTheme()
+    LoadGaugeCalibration()
+    SyncGaugeCalibrationToCore()
 
     DrawGauge(HPWin, "HP", lastHP, HP_STOPS)
     DrawGauge(MPWin, "MP", lastMP, MP_STOPS)
@@ -1214,6 +2921,10 @@ function SetAlertThreshold(which, value)
         )
 
     end
+
+    -- Persist the changed threshold immediately rather than waiting for a
+    -- later world/plugin save.
+    pcall(SaveState)
 
     DrawGauge(
         HPWin,

@@ -11,19 +11,19 @@
     purpose="Installs/updates the SquareSoft UI suite and applies the bundled saved window layout."
     date_written="2026-09-14"
     requires="4.73"
-    version="2.19"
+    version="2.21"
     save_state="y"
 >
 
 <description trim="y">
 <![CDATA[
-SQUARESOFT UI INSTALLER v2.19
+SQUARESOFT UI INSTALLER v2.21
 
 Put this installer and all suite XML files in the same folder.
 
 All static theme gutter graphics plus warning/critical-alert gutter graphics are bundled in this folder.
 
-Production channel note: Autobuff Tracker and Chakra Cooldown are installed with the suite but disabled by default. Users may enable either plugin from MUSHclient's Plugins dialog.
+Production build: Autobuff Tracker and Chakra Cooldown are installed with the suite but disabled by default. Enable either from MUSHclient's Plugins dialog if desired.
 
 A preconfigured SquareSoft_UI_Layout.txt is bundled and will be loaded
 after all suite plugins have been installed. The Plugin Controller compares the
@@ -165,7 +165,7 @@ PLUGIN_CONTROLLER_ID = "5f2a91c7d3e84b60a1c9e742"
 CORE_TRIGGERS_ID = "f3a9c2e71b4d4068a5c912ef"
 CHAT_ROUTER_ID = "e4b8d2a16c3f4079b5a821dc"
 LAYOUT_FILENAME = "SquareSoft_UI_Layout.txt"
-INSTALLER_VERSION = "2.19"
+INSTALLER_VERSION = "2.21"
 WORLD_OUTPUT_FONT_NAME = "Consolas"
 WORLD_OUTPUT_FONT_POINTS = 11
 
@@ -348,6 +348,11 @@ end
 
 function UnloadBundledPlugins()
     -- Unload in reverse order so dependants disappear before their providers.
+    -- A failure is isolated to that plugin: continue processing the rest of the
+    -- suite and remember which existing copies must not be reloaded in-place.
+    local failed = {}
+    local failureCount = 0
+
     for i = #SUITE, 1, -1 do
         local item = SUITE[i]
 
@@ -355,66 +360,91 @@ function UnloadBundledPlugins()
             local rc = UnloadPlugin(item.id)
 
             if rc ~= error_code.eOK then
+                failed[item.id] = true
+                failureCount = failureCount + 1
                 InstallerNote(
                     "red",
                     "Could not unload " .. item.name ..
-                    " (error " .. tostring(rc) .. ")."
+                    " (error " .. tostring(rc) ..
+                    "); leaving its existing copy alone and continuing."
                 )
-                return false
             end
         end
     end
 
-    return true
+    return failed, failureCount
 end
 
-function LoadBundledPlugins()
+function LoadBundledPlugins(skipReload)
     local loaded = 0
+    local kept = 0
+    local failed = 0
+    skipReload = skipReload or {}
 
     for _, item in ipairs(SUITE) do
         local path = JoinSuitePath(item.file)
 
-        if not FileExists(path) then
-            InstallerNote("red", "Missing file: " .. path)
-            return false
-        end
-
-        local rc = LoadPlugin(path)
-
-        if rc ~= error_code.eOK then
+        if skipReload[item.id] and IsPluginInstalled(item.id) then
+            kept = kept + 1
+            InstallerNote(
+                "yellow",
+                "Kept existing " .. item.name ..
+                " because its previous copy could not be unloaded."
+            )
+        elseif not FileExists(path) then
+            failed = failed + 1
             InstallerNote(
                 "red",
-                "Could not load " .. item.name ..
-                " (error " .. tostring(rc) .. ")."
-            )
-            return false
-        end
-
-        loaded = loaded + 1
-
-        if item.default_enabled == false then
-            local enableRc = EnablePlugin(item.id, false)
-            if enableRc ~= error_code.eOK then
-                InstallerNote(
-                    "red",
-                    "Loaded " .. item.name ..
-                    " but could not apply its disabled-by-default state (error " ..
-                    tostring(enableRc) .. ")."
-                )
-                return false
-            end
-
-            InstallerNote(
-                "gray",
-                "Loaded " .. item.name .. " (installed disabled by production default)"
+                "Missing " .. item.name .. " file: " .. path ..
+                " -- continuing with the remaining plugins."
             )
         else
-            InstallerNote("gray", "Loaded " .. item.name)
+            local rc = LoadPlugin(path)
+
+            if rc ~= error_code.eOK then
+                failed = failed + 1
+                InstallerNote(
+                    "red",
+                    "Could not load " .. item.name ..
+                    " (error " .. tostring(rc) ..
+                    "); continuing with the remaining plugins."
+                )
+            else
+                loaded = loaded + 1
+
+                if item.default_enabled == false then
+                    local enableRc = EnablePlugin(item.id, false)
+                    if enableRc ~= error_code.eOK then
+                        failed = failed + 1
+                        InstallerNote(
+                            "red",
+                            "Loaded " .. item.name ..
+                            " but could not apply its disabled-by-default state (error " ..
+                            tostring(enableRc) .. ")."
+                        )
+                    else
+                        InstallerNote(
+                            "gray",
+                            "Loaded " .. item.name ..
+                            " (installed disabled by production default)"
+                        )
+                    end
+                else
+                    InstallerNote("gray", "Loaded " .. item.name)
+                end
+            end
         end
     end
 
-    InstallerNote("lime", tostring(loaded) .. " bundled plugins loaded.")
-    return true
+    InstallerNote(
+        failed > 0 and "yellow" or "lime",
+        tostring(loaded) .. " bundled plugins loaded" ..
+        (kept > 0 and (", " .. tostring(kept) .. " existing copy/copies kept") or "") ..
+        (failed > 0 and (", " .. tostring(failed) .. " plugin error(s)") or "") ..
+        "."
+    )
+
+    return loaded, kept, failed
 end
 
 function BundledLayoutPath()
@@ -518,13 +548,15 @@ function InstallSuite(applyLayout, disablePortableForMigration)
 
     local savedPortableState = tostring(GetVariable("portable_triggers_enabled") or "")
 
-    if not UnloadBundledPlugins() then
-        return false
-    end
+    local unloadFailures, unloadFailureCount =
+        UnloadBundledPlugins()
 
-    if not LoadBundledPlugins() then
-        return false
-    end
+    local loadedCount, keptCount, loadFailureCount =
+        LoadBundledPlugins(unloadFailures)
+
+    local pluginFailureCount =
+        (tonumber(unloadFailureCount) or 0) +
+        (tonumber(loadFailureCount) or 0)
 
     if disablePortableForMigration then
         SetPortableTriggerState(false)
@@ -550,13 +582,26 @@ function InstallSuite(applyLayout, disablePortableForMigration)
         ScheduleBundledLayout()
 
         InstallerNote(
-            "lime",
-            "Install complete. Saved layout will be applied in about one second."
+            pluginFailureCount > 0 and "yellow" or "lime",
+            pluginFailureCount > 0
+                and (
+                    "Install completed with " ..
+                    tostring(pluginFailureCount) ..
+                    " isolated plugin error(s). Healthy plugins remain active; " ..
+                    "saved layout will still be applied in about one second."
+                )
+                or "Install complete. Saved layout will be applied in about one second."
         )
     else
         InstallerNote(
-            "lime",
-            "Bare install complete. Layout was NOT applied."
+            pluginFailureCount > 0 and "yellow" or "lime",
+            pluginFailureCount > 0
+                and (
+                    "Bare install completed with " ..
+                    tostring(pluginFailureCount) ..
+                    " isolated plugin error(s). Layout was NOT applied."
+                )
+                or "Bare install complete. Layout was NOT applied."
         )
         InstallerNote(
             "gray",
@@ -572,7 +617,7 @@ function InstallSuite(applyLayout, disablePortableForMigration)
         )
     end
 
-    return true
+    return pluginFailureCount == 0
 end
 
 function SuiteInstallAlias()

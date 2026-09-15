@@ -1,43 +1,51 @@
-# SquareSoft MUSHclient UI Pack
+# UOSS UI
 
-A portable MUSHclient plugin suite for SquareSoft/UOSSMUD.
+Portable MUSHclient UI suite for UOSSMUD.
 
-## Current baseline
-
-Current baseline: **v2.19 — Optional Cockpit Plugins**.
-
-The `bundle/` directory is the distributable client pack. Keep its files together: several plugins intentionally load sibling XML/assets/data files by relative path.
-
-## Branches
-
-- `main` — production/stable. Autobuff Tracker and Chakra Cooldown are bundled and installed but default to disabled.
-- `dev` — active development. Those two plugins are bundled and enabled by default for testing.
-
-The two optional plugins are the supplied Autobuff Tracker v1.2 and Chakra Cooldown v2.4. Autobuff Tracker expects world triggers named `ag`, `b`, and `end` plus the corresponding `agon/agoff`, `bon/boff`, and `endon/endoff` aliases.
+Current release: **v2.21**
 
 ## Install
 
-1. Copy or extract `bundle/` to a permanent folder.
-2. In MUSHclient, install `bundle/SquareSoft_UI_Installer.xml`.
-3. Let the installer load the managed plugin suite.
+1. Download or clone this repository.
+2. Keep the entire `bundle/` directory together.
+3. In MUSHclient, install:
+   `bundle/SquareSoft_UI_Installer.xml`
+4. Let the installer load the suite and apply the bundled layout.
 
-The canonical automapper seed database (`SquareSoft_CanonicalMap_seed.sqlite`) must remain beside `SquareSoft_Automapper.xml`.
+The installer scales the reference layout for the primary monitor, sets the world output font to Consolas 11, and loads the managed plugins in dependency order.
 
-## Repository layout
+## Important files
 
-- `bundle/` — exact files intended to ship to users.
-- `tools/` — development/release helpers.
-- `CHANGELOG.md` — package-level changes.
+Do not separate these from the rest of `bundle/`:
 
-## Development rules
+- `SquareSoft_CanonicalMap_seed.sqlite` — canonical Automapper seed used for clean installs.
+- `SquareSoft_UI_Layout.txt` — bundled reference layout.
+- `gutters/` — theme and HP-warning gutter artwork.
+- All bundled XML files — several features integrate across plugins by stable plugin ID.
 
-- Treat portability as a feature requirement: required behavior should not depend on one developer's MUSHclient world file.
-- Preserve plugin IDs across upgrades.
-- Do not rename or relocate files in `bundle/` without updating installer/relative-path assumptions.
-- Do not commit runtime/learned mapper databases.
-- Before packaging, validate XML and ZIP integrity.
-- Changes should preserve existing suite behavior unless the change explicitly replaces it.
+The Automapper creates its writable learned/runtime database separately. User-specific learned map state is not included in this repository.
 
-## Runtime data
+## Optional plugins
 
-The automapper copies the tracked canonical seed into a writable runtime database named `SquareSoft_Automapper_Canonical.sqlite` in MUSHclient's data area. That runtime database contains user-specific learned state and is deliberately not source-controlled.
+Autobuff Tracker and Chakra Cooldown are included but **disabled by default** in the production installer. Enable them from MUSHclient's Plugins dialog if wanted.
+
+`SquareSoft_Autobuff_World_Aliases.xml` is an optional one-time world import for the `agon/agoff`, `bon/boff`, and `endon/endoff` aliases. Those aliases control world triggers named `ag`, `b`, and `end`.
+
+## Useful commands
+
+- `suite install` — reinstall/update the bundled suite.
+- `suite install bare` — reinstall without applying the layout.
+- `suite layout` — reapply the bundled layout.
+- `suite status` — report bundled plugin/file status.
+- `theme default|classic|amber` — choose the base UI theme.
+- `alert status` — show HP warning/alert configuration.
+- `gauges setup` — calibrate HP/MP parsing for your character's status format.
+- `chats show` / `chats hide` — show or hide the Communication window.
+
+In the Communication miniwindow, drag across text to select it; releasing the mouse copies the selection to the Windows clipboard. A plain left-click copies the whole logical message.
+
+## Portability
+
+This repository is the distributable build. It intentionally excludes development history, internal audits, build scripts, and maintainer-only tooling.
+
+The suite may integrate across plugins, but cross-plugin failures are contained where practical: a missing or unhealthy optional sibling should disable only the feature that depends on it rather than taking down the rest of the UI.

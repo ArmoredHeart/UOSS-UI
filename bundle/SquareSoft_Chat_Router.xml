@@ -10,12 +10,12 @@
     purpose="Portable SquareSoft chat/tell capture rules for Generic_Chat_Miniwindow"
     date_written="2026-09-14"
     requires="4.73"
-    version="1.1"
+    version="1.2"
     save_state="y"
 >
 <description trim="y">
 <![CDATA[
-SQUARESOFT CHAT ROUTER v1.1
+SQUARESOFT CHAT ROUTER v1.2
 
 Owns the chat-routing triggers that Generic_Chat_Miniwindow intentionally does
 not define itself. Matching lines are removed from the raw server output and
@@ -45,7 +45,7 @@ All trigger names are stable and live in group SS_CHAT_ROUTER.
       name="SS_CHAT_CHANNELS"
       group="SS_CHAT_ROUTER"
       script="RouteChat"
-      match="^\[(?:PartyTell|announce|newbie|gossip|death|auction|PlayerAuction)\]\s+.*$"
+      match="^\s*\[(?:PartyTell|announce|newbie|gossip|death|auction|PlayerAuction)\]\s+.*?\s*$"
       regexp="y"
       ignore_case="y"
       enabled="y"
@@ -58,7 +58,7 @@ All trigger names are stable and live in group SS_CHAT_ROUTER.
       name="SS_CHAT_YOU_SAY"
       group="SS_CHAT_ROUTER"
       script="RouteChat"
-      match="^You say,\s+.*$"
+      match="^\s*You\s+say,\s*.*?\s*$"
       regexp="y"
       ignore_case="y"
       enabled="y"
@@ -71,7 +71,7 @@ All trigger names are stable and live in group SS_CHAT_ROUTER.
       name="SS_CHAT_YOU_TELL"
       group="SS_CHAT_ROUTER"
       script="RouteChat"
-      match="^You tell [^:]+:\s*.*$"
+      match="^\s*You\s+tell\s+[^:]+:\s*.*?\s*$"
       regexp="y"
       ignore_case="y"
       enabled="y"
@@ -84,7 +84,7 @@ All trigger names are stable and live in group SS_CHAT_ROUTER.
       name="SS_CHAT_TELLS_YOU"
       group="SS_CHAT_ROUTER"
       script="RouteChat"
-      match="^(?!\[)(?!You say,)(?!You tell ).+? tells you(?::|,)\s*.*$"
+      match="^\s*(?!\[)(?!You\s+say,)(?!You\s+tell\s+).+?\s+tells\s+you(?::|,)\s*.*?\s*$"
       regexp="y"
       ignore_case="y"
       enabled="y"

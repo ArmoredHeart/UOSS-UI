@@ -8,12 +8,12 @@
     language="Lua"
     purpose="Shared SquareSoft UI theme controller"
     date_written="2026-09-14"
-    version="2.2"
+    version="2.8"
     save_state="y"
 >
 <description trim="y">
 <![CDATA[
-SQUARESOFT UI THEME CONTROLLER v2.2
+SQUARESOFT UI THEME CONTROLLER v2.8
 
 Public themes:
   theme default   - GREEN TERMINAL palette (the old "green")
@@ -23,6 +23,19 @@ Public themes:
 There is no separate public "green" theme anymore: its palette IS "default".
 The former "default" palette has been moved to "classic".
   theme status
+
+HP alert-theme commands:
+  alert warning <percent>   - yellow warning theme at/below this HP percentage
+  alert alert <percent>     - red alert theme at/below this HP percentage
+  alert off                 - disable automatic HP warning/alert themes
+  alert on                  - re-enable automatic HP warning/alert themes
+  alert status              - show thresholds, state, HP, and effective theme
+
+For compatibility, "alert critical <percent>" and "alert red <percent>" are
+synonyms for "alert alert <percent>".
+
+Defaults are warning 40% and alert 20%. Setting either threshold to 0 disables
+that individual tier.
 
 For backward compatibility, "theme green" is accepted as a deprecated synonym
 for "theme default".
@@ -38,11 +51,74 @@ On first upgrade with the same plugin ID, saved names are migrated:
   <alias name="Theme_Command" script="ThemeCommand"
          match="^theme(?:\s+(default|classic|amber|green|status))?$"
          regexp="y" ignore_case="y" enabled="y" sequence="10"></alias>
+
+  <alias name="Theme_AlertWarning" script="AlertWarningCommand"
+         match="^alert\s+warning\s+(\d+)$"
+         regexp="y" ignore_case="y" enabled="y" sequence="10"></alias>
+
+  <alias name="Theme_AlertCritical" script="AlertCriticalCommand"
+         match="^alert\s+(?:alert|critical|red)\s+(\d+)$"
+         regexp="y" ignore_case="y" enabled="y" sequence="10"></alias>
+
+  <alias name="Theme_AlertOff" script="AlertOffCommand"
+         match="^alert\s+off$"
+         regexp="y" ignore_case="y" enabled="y" sequence="10"></alias>
+
+  <alias name="Theme_AlertOn" script="AlertOnCommand"
+         match="^alert\s+on$"
+         regexp="y" ignore_case="y" enabled="y" sequence="10"></alias>
+
+  <alias name="Theme_AlertStatus" script="AlertStatusCommand"
+         match="^alert\s+status$"
+         regexp="y" ignore_case="y" enabled="y" sequence="10"></alias>
 </aliases>
+
+<triggers>
+  <trigger
+      name="Theme_HP_Condition"
+      script="ThemeConditionLine"
+      match="^\s*&lt;&lt;OVERALL CONDITION:.*&gt;&gt;\s*$"
+      regexp="y"
+      ignore_case="y"
+      enabled="y"
+      keep_evaluating="y"
+      omit_from_output="n"
+      sequence="65"
+  ></trigger>
+</triggers>
 
 <script>
 <![CDATA[
 THEME_BROADCAST_MESSAGE = 9042
+
+-- 9043 is reserved for World Map state and 9044 for enemy snapshots.
+-- HP/MP Gauges publishes observed HP percentages on this dedicated channel.
+HP_PERCENT_BROADCAST_MESSAGE = 9045
+HP_GAUGE_PLUGIN_ID = "d47f6a92e1b83c5f0a9e2716"
+
+DEFAULT_WARNING_THRESHOLD = 40
+DEFAULT_CRITICAL_THRESHOLD = 20
+
+local warningThreshold =
+    tonumber(GetVariable("alert_warning_threshold")) or DEFAULT_WARNING_THRESHOLD
+
+local criticalThreshold =
+    tonumber(GetVariable("alert_critical_threshold")) or DEFAULT_CRITICAL_THRESHOLD
+
+local alertThemesEnabled =
+    GetVariable("alert_themes_enabled") ~= "false"
+
+local lastHPPercent = nil
+
+local function ClampPercent(value)
+    value = math.floor(tonumber(value) or 0)
+    if value < 0 then return 0 end
+    if value > 100 then return 100 end
+    return value
+end
+
+warningThreshold = ClampPercent(warningThreshold)
+criticalThreshold = ClampPercent(criticalThreshold)
 
 PALETTES = {
     autobuff = {
@@ -134,6 +210,44 @@ PALETTES = {
             none = "#6D421C",
             unscanned = "#FF9D26",
             separator = "#2D1809",
+        },
+    },
+    chat = {
+        default = {
+            background = "#000500",
+            border = "#285B28",
+            title_bar = "#061306",
+            title_text = "#9AFF82",
+            highlight = "#B8FFAC",
+            face = "#3F7A3F",
+            inner_shadow = "#285328",
+            outer_shadow = "#102A10",
+            back_face = "#285328",
+            detail = "#001000",
+        },
+        classic = {
+            background = "#000000",
+            border = "#E8E8E8",
+            title_bar = "#202020",
+            title_text = "#D4D0C8",
+            highlight = "#FFFFFF",
+            face = "#D4D0C8",
+            inner_shadow = "#808080",
+            outer_shadow = "#404040",
+            back_face = "#E8E8E8",
+            detail = "#000000",
+        },
+        amber = {
+            background = "#050301",
+            border = "#6B3D18",
+            title_bar = "#160B03",
+            title_text = "#FFB347",
+            highlight = "#FFCF8A",
+            face = "#8A4A16",
+            inner_shadow = "#5A2E0C",
+            outer_shadow = "#2C1606",
+            back_face = "#5A2E0C",
+            detail = "#120A03",
         },
     },
     chakra = {
@@ -437,6 +551,147 @@ VALID_THEMES = {
     amber = true
 }
 
+-- Automatic alert themes are effective themes, not user-selectable base themes.
+-- They deliberately recolour ALL shared miniwindow palettes while active.
+ALERT_ROLE_COLOURS = {
+    warning = {
+        background = "#080700",
+        panel = "#141100",
+        border = "#806A00",
+        title_bar = "#1C1800",
+        title_text = "#FFE55C",
+        title = "#FFE55C",
+        label = "#D6BC33",
+        text = "#F2D95A",
+        name = "#FFF3A3",
+        none = "#8B7A27",
+        unscanned = "#FFD84A",
+        separator = "#4A3D00",
+        row_separator = "#4A3D00",
+        row_hover = "#171300",
+        bezel_fill = "#171300",
+        bezel_border = "#080700",
+        on_outer = "#705A00",
+        on_middle = "#B99A00",
+        on_inner = "#FFE34A",
+        on_highlight = "#FFF6B0",
+        off_outer = "#2A2400",
+        off_middle = "#4A3D00",
+        off_inner = "#6A5700",
+        off_highlight = "#8A7400",
+        ready_outer = "#705A00",
+        ready_middle = "#B99A00",
+        ready_inner = "#FFE34A",
+        ready_highlight = "#FFF6B0",
+        cooldown_outer = "#2A2400",
+        cooldown_middle = "#4A3D00",
+        cooldown_inner = "#6A5700",
+        cooldown_highlight = "#8A7400",
+        face = "#0D0B00",
+        outline = "#A98B00",
+        tick = "#C9A900",
+        inactive = "#0D0B00",
+        dark = "#5C4B00",
+        gray = "#806A00",
+        dim = "#3D3300",
+        lightgray = "#D6BC33",
+        active = "#FFE34A",
+        active_dark = "#806A00",
+        other = "#D6BC33",
+        dial_face = "#0D0B00",
+        dial_outer = "#A98B00",
+        dial_inner = "#5C4B00",
+        track = "#332A00",
+        hub = "#FFE34A",
+        readout = "#FFE55C",
+        mp_active = "#FFE34A",
+        mp_active_dark = "#806A00",
+        positive = "#FFE34A",
+        negative = "#FFB52E",
+        unknown = "#8B7A27",
+        alert_bright = "#FFF06A",
+        alert_dark = "#6A5700",
+        alert_text = "#FFF7C2",
+        scroll_track = "#0D0B00",
+        scroll_thumb = "#806A00",
+        scroll_arrow = "#FFE55C",
+        xp = "#FFF3A3",
+        ap = "#E8C94A",
+        gold = "#FFE55C",
+        graph_border = "#806A00",
+        graph_bg = "#0D0B00",
+        graph_grid = "#4A3D00"
+    },
+    red = {
+        background = "#080000",
+        panel = "#140000",
+        border = "#7A1010",
+        title_bar = "#1A0000",
+        title_text = "#FF6B6B",
+        title = "#FF6B6B",
+        label = "#D94A4A",
+        text = "#F07070",
+        name = "#FFB0B0",
+        none = "#8B3333",
+        unscanned = "#FF5757",
+        separator = "#3A0808",
+        row_separator = "#3A0808",
+        row_hover = "#170000",
+        bezel_fill = "#170000",
+        bezel_border = "#080000",
+        on_outer = "#6B0B0B",
+        on_middle = "#B51C1C",
+        on_inner = "#FF4040",
+        on_highlight = "#FFD0D0",
+        off_outer = "#250303",
+        off_middle = "#410606",
+        off_inner = "#650A0A",
+        off_highlight = "#8B1515",
+        ready_outer = "#6B0B0B",
+        ready_middle = "#B51C1C",
+        ready_inner = "#FF4040",
+        ready_highlight = "#FFD0D0",
+        cooldown_outer = "#250303",
+        cooldown_middle = "#410606",
+        cooldown_inner = "#650A0A",
+        cooldown_highlight = "#8B1515",
+        face = "#0D0000",
+        outline = "#A91515",
+        tick = "#C92525",
+        inactive = "#0D0000",
+        dark = "#5C0B0B",
+        gray = "#7A1010",
+        dim = "#3D0707",
+        lightgray = "#D94A4A",
+        active = "#FF4040",
+        active_dark = "#7A1010",
+        other = "#D94A4A",
+        dial_face = "#0D0000",
+        dial_outer = "#A91515",
+        dial_inner = "#5C0B0B",
+        track = "#320505",
+        hub = "#FF4040",
+        readout = "#FF6B6B",
+        mp_active = "#FF5555",
+        mp_active_dark = "#7A1010",
+        positive = "#FF7777",
+        negative = "#FF3030",
+        unknown = "#8B3333",
+        alert_bright = "#FF3030",
+        alert_dark = "#5A0808",
+        alert_text = "#FFD0D0",
+        scroll_track = "#0D0000",
+        scroll_thumb = "#7A1010",
+        scroll_arrow = "#FF6B6B",
+        xp = "#FFB0B0",
+        ap = "#F07070",
+        gold = "#FF6B6B",
+        graph_border = "#7A1010",
+        graph_bg = "#0D0000",
+        graph_grid = "#3A0808"
+    }
+}
+
 function NormalizeThemeName(name)
     name = tostring(name or ""):lower():match("^%s*(.-)%s*$") or ""
     if name == "green" then return "default" end
@@ -464,6 +719,9 @@ function MigrateSavedThemeName()
     local existing = NormalizeThemeName(GetVariable("theme"))
     if not existing then existing = "default" end
     SetVariable("theme", existing)
+
+    -- A fresh plugin load should start from the user's base theme until a fresh
+    -- HP observation arrives. Do not revive a stale red/warning state from disk.
     SetVariable("effective_theme", existing)
     return existing
 end
@@ -474,11 +732,86 @@ function CurrentTheme()
     return theme
 end
 
+
+local function RefreshHPFromGauge()
+    -- Calibrated HP parsing lives in HP_MP_Gauges. Treat its normalized
+    -- percentage as the authoritative alert-theme source whenever available,
+    -- rather than depending on the legacy fixed-format condition-line trigger.
+    if PluginSupports(
+        HP_GAUGE_PLUGIN_ID,
+        "GetCurrentHPPercent"
+    ) ~= error_code.eOK
+    then
+        return false
+    end
+
+    local rc, value =
+        CallPlugin(
+            HP_GAUGE_PLUGIN_ID,
+            "GetCurrentHPPercent"
+        )
+
+    if rc ~= error_code.eOK then
+        return false
+    end
+
+    local hp = tonumber(value)
+    if not hp then
+        return false
+    end
+
+    lastHPPercent = ClampPercent(hp)
+    return true
+end
+
+local function EffectiveThemeForHP(hp)
+    local base = CurrentTheme()
+
+    if not alertThemesEnabled then
+        return base
+    end
+
+    hp = tonumber(hp)
+
+    if not hp then
+        return base
+    end
+
+    -- Alert is more severe and therefore always wins when both ranges overlap.
+    if criticalThreshold > 0 and hp <= criticalThreshold then
+        return "red"
+    end
+
+    if warningThreshold > 0 and hp <= warningThreshold then
+        return "warning"
+    end
+
+    return base
+end
+
+local function BroadcastEffectiveTheme(force)
+    -- Pull the most recent normalized HP from the calibrated gauge plugin when
+    -- possible. The normal gauge broadcast still updates us immediately, but
+    -- this closes reload/reinstall/order gaps and makes alert commands reliable.
+    RefreshHPFromGauge()
+
+    local effective = EffectiveThemeForHP(lastHPPercent)
+    local previous = tostring(GetVariable("effective_theme") or "")
+
+    SetVariable("theme", CurrentTheme())
+    SetVariable("effective_theme", effective)
+
+    -- Repaint when the effective theme changes, and also whenever explicitly
+    -- forced by an alert/theme command or plugin lifecycle refresh.
+    if force == true or previous ~= effective then
+        BroadcastPlugin(THEME_BROADCAST_MESSAGE, effective)
+    end
+
+    return effective
+end
+
 function BroadcastTheme()
-    local theme = CurrentTheme()
-    SetVariable("theme", theme)
-    SetVariable("effective_theme", theme)
-    BroadcastPlugin(THEME_BROADCAST_MESSAGE, theme)
+    return BroadcastEffectiveTheme(true)
 end
 
 function SetTheme(name)
@@ -487,9 +820,8 @@ function SetTheme(name)
     if not theme then return false end
 
     SetVariable("theme", theme)
-    SetVariable("effective_theme", theme)
     SetVariable("theme_name_migration_v21", "1")
-    BroadcastTheme()
+    BroadcastEffectiveTheme(true)
 
     if requested == "green" then
         ColourNote("yellow", "", "[Theme] 'green' is now named 'default'.")
@@ -498,11 +830,33 @@ function SetTheme(name)
     return true
 end
 
+local function CurrentEffectiveTheme()
+    local effective = tostring(GetVariable("effective_theme") or ""):lower()
+
+    if effective == "warning" or effective == "red" then
+        return effective
+    end
+
+    return CurrentTheme()
+end
+
 function GetThemeColour(profile, role)
     profile = tostring(profile or ""):lower()
     role = tostring(role or "")
+
     local p = PALETTES[profile]
     if not p then return "" end
+
+    local effective = CurrentEffectiveTheme()
+
+    if effective == "warning" or effective == "red" then
+        local alertPalette = ALERT_ROLE_COLOURS[effective]
+        local alertColour = alertPalette and alertPalette[role]
+        if alertColour and alertColour ~= "" then
+            return tostring(alertColour)
+        end
+    end
+
     local t = p[CurrentTheme()]
     if not t then return "" end
     return tostring(t[role] or "")
@@ -512,11 +866,181 @@ function GetThemeName()
     return CurrentTheme()
 end
 
+function GetEffectiveThemeName()
+    return CurrentEffectiveTheme()
+end
+
+local function ValidateAlertThresholds(newWarning, newCritical)
+    newWarning = ClampPercent(newWarning)
+    newCritical = ClampPercent(newCritical)
+
+    if newWarning > 0 and newCritical > 0 and newCritical > newWarning then
+        return nil, nil,
+            "Critical threshold cannot be higher than warning threshold."
+    end
+
+    return newWarning, newCritical, nil
+end
+
+local function SaveAlertThresholds()
+    SetVariable("alert_warning_threshold", tostring(warningThreshold))
+    SetVariable("alert_critical_threshold", tostring(criticalThreshold))
+    SetVariable("alert_themes_enabled", alertThemesEnabled and "true" or "false")
+end
+
+local function PersistAlertSettings()
+    SaveAlertThresholds()
+
+    -- Commit the plugin variables immediately so alert on/off and thresholds
+    -- survive disconnects, crashes, and client restarts without requiring a
+    -- manual world save. Do not call this from OnPluginSaveState itself.
+    pcall(SaveState)
+end
+
+function AlertWarningCommand(name, line, wildcards)
+    local requested = tonumber((wildcards and wildcards[1]) or "")
+    if requested == nil or requested < 0 or requested > 100 then
+        ColourNote("red", "", "[Alert] Warning threshold must be 0-100.")
+        return
+    end
+
+    local newWarning, newCritical, why =
+        ValidateAlertThresholds(requested, criticalThreshold)
+
+    if why then
+        ColourNote("red", "", "[Alert] " .. why)
+        return
+    end
+
+    warningThreshold = newWarning
+    criticalThreshold = newCritical
+    PersistAlertSettings()
+    local effective = BroadcastEffectiveTheme(true)
+
+    ColourNote(
+        "yellow",
+        "",
+        warningThreshold == 0
+            and "[Alert] Warning theme disabled."
+            or "[Alert] Warning theme engages at/below " ..
+               tostring(warningThreshold) .. "% HP."
+    )
+    ColourNote("gray", "", "[Alert] Effective theme: " .. effective)
+end
+
+function AlertCriticalCommand(name, line, wildcards)
+    local requested = tonumber((wildcards and wildcards[1]) or "")
+    if requested == nil or requested < 0 or requested > 100 then
+        ColourNote("red", "", "[Alert] Alert threshold must be 0-100.")
+        return
+    end
+
+    local newWarning, newCritical, why =
+        ValidateAlertThresholds(warningThreshold, requested)
+
+    if why then
+        ColourNote("red", "", "[Alert] " .. why)
+        return
+    end
+
+    warningThreshold = newWarning
+    criticalThreshold = newCritical
+    PersistAlertSettings()
+    local effective = BroadcastEffectiveTheme(true)
+
+    ColourNote(
+        "yellow",
+        "",
+        criticalThreshold == 0
+            and "[Alert] Red alert theme disabled."
+            or "[Alert] Red alert theme engages at/below " ..
+               tostring(criticalThreshold) .. "% HP."
+    )
+    ColourNote("gray", "", "[Alert] Effective theme: " .. effective)
+end
+
+function AlertOffCommand(name, line, wildcards)
+    alertThemesEnabled = false
+    PersistAlertSettings()
+    local effective = BroadcastEffectiveTheme(true)
+
+    ColourNote("yellow", "", "[Alert] Automatic HP warning/alert themes OFF.")
+    ColourNote("gray", "", "[Alert] Restored base theme: " .. effective)
+end
+
+function AlertOnCommand(name, line, wildcards)
+    alertThemesEnabled = true
+    PersistAlertSettings()
+    local effective = BroadcastEffectiveTheme(true)
+
+    ColourNote("lime", "", "[Alert] Automatic HP warning/alert themes ON.")
+    ColourNote("gray", "", "[Alert] Effective theme: " .. effective)
+end
+
+function AlertStatusCommand(name, line, wildcards)
+    RefreshHPFromGauge()
+    local hpText = lastHPPercent and (tostring(lastHPPercent) .. "%") or "no fresh reading"
+    ColourNote(
+        "cyan",
+        "",
+        "[Alert] " .. (alertThemesEnabled and "ON" or "OFF") ..
+        "  warning=" .. tostring(warningThreshold) ..
+        "%  alert=" .. tostring(criticalThreshold) ..
+        "%  HP=" .. hpText ..
+        "  base=" .. CurrentTheme() ..
+        "  effective=" .. tostring(GetVariable("effective_theme") or CurrentTheme())
+    )
+end
+
+local function ObserveHPPercent(value)
+    local hp = tonumber(value)
+    if not hp then
+        return false
+    end
+
+    lastHPPercent = ClampPercent(hp)
+
+    -- Normally this only broadcasts when the effective theme changes. The
+    -- controller can always recover missed repaint events through forced
+    -- lifecycle/command refreshes and direct gauge queries.
+    BroadcastEffectiveTheme(false)
+    return true
+end
+
+
+function SetObservedHPPercent(value)
+    -- Public normalized-HP API for HP_MP_Gauges. This direct call is the
+    -- primary cross-plugin path; the 9045 broadcast remains a compatibility
+    -- fallback for older gauge versions and other consumers.
+    if ObserveHPPercent(value) then
+        return "ok"
+    end
+
+    return "invalid"
+end
+
+function ThemeConditionLine(name, line, wildcards)
+    -- The alert theme has its own non-owning observer so it still works if the
+    -- gauge window is hidden/disabled or another plugin changes its internals.
+    -- We only need the HP field, so do not overfit the rest of the condition line.
+    local hp =
+        tostring(line or ""):match(
+            "^%s*<<OVERALL CONDITION:%s*<HP:%s*(%d+)%%%s*>"
+        )
+
+    ObserveHPPercent(hp)
+end
+
 function ThemeCommand(name, line, wildcards)
     local arg = tostring((wildcards and wildcards[1]) or ""):lower()
     if arg == "" or arg == "status" then
-        ColourNote("cyan", "", "[Theme] current=" .. CurrentTheme() ..
-            "  available: default, classic, amber")
+        ColourNote(
+            "cyan",
+            "",
+            "[Theme] base=" .. CurrentTheme() ..
+            "  effective=" .. tostring(GetVariable("effective_theme") or CurrentTheme()) ..
+            "  available: default, classic, amber"
+        )
         return
     end
     if not SetTheme(arg) then
@@ -524,20 +1048,53 @@ function ThemeCommand(name, line, wildcards)
     end
 end
 
+function OnPluginBroadcast(msg, id, name, text)
+    if msg ~= HP_PERCENT_BROADCAST_MESSAGE or id ~= HP_GAUGE_PLUGIN_ID then
+        return
+    end
+
+    -- Gauge broadcast is retained as a fallback/secondary source. The direct
+    -- condition observer above normally sees the same HP first; de-duplication in
+    -- BroadcastEffectiveTheme prevents a second redraw.
+    ObserveHPPercent(text)
+end
+
 function OnPluginInstall()
+    warningThreshold = ClampPercent(
+        tonumber(GetVariable("alert_warning_threshold")) or DEFAULT_WARNING_THRESHOLD
+    )
+    criticalThreshold = ClampPercent(
+        tonumber(GetVariable("alert_critical_threshold")) or DEFAULT_CRITICAL_THRESHOLD
+    )
+    alertThemesEnabled =
+        GetVariable("alert_themes_enabled") ~= "false"
+
+    local w, c, why = ValidateAlertThresholds(warningThreshold, criticalThreshold)
+    if why then
+        warningThreshold = DEFAULT_WARNING_THRESHOLD
+        criticalThreshold = DEFAULT_CRITICAL_THRESHOLD
+    else
+        warningThreshold = w
+        criticalThreshold = c
+    end
+
+    SaveAlertThresholds()
     MigrateSavedThemeName()
-    BroadcastTheme()
+    RefreshHPFromGauge()
+    BroadcastEffectiveTheme(true)
 end
 
 function OnPluginEnable()
     MigrateSavedThemeName()
-    BroadcastTheme()
+    RefreshHPFromGauge()
+    BroadcastEffectiveTheme(true)
 end
 
 function OnPluginSaveState()
     local theme = CurrentTheme()
     SetVariable("theme", theme)
-    SetVariable("effective_theme", theme)
+    SaveAlertThresholds()
+    SetVariable("effective_theme", EffectiveThemeForHP(lastHPPercent))
 end
 ]]>
 </script>

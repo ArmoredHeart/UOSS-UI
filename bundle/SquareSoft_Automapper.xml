@@ -2504,7 +2504,24 @@ function LoadTravelBookmarks()
 end
 
 function RefreshTravelWindowNow()
-    CallPlugin(TRAVEL_WINDOW_PLUGIN_ID, "RefreshAliases")
+    -- Travel shortcuts are an optional presentation/integration layer.
+    -- Automapping and alias registration must continue if that plugin is
+    -- missing, disabled, or its refresh API is unavailable.
+    if PluginSupports(
+        TRAVEL_WINDOW_PLUGIN_ID,
+        "RefreshAliases"
+    ) ~= error_code.eOK
+    then
+        return false
+    end
+
+    local rc =
+        CallPlugin(
+            TRAVEL_WINDOW_PLUGIN_ID,
+            "RefreshAliases"
+        )
+
+    return rc == error_code.eOK
 end
 
 function RegisterCurrentRoomSpeedwalk(command)
