@@ -1,0 +1,1451 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+
+<muclient>
+
+<plugin
+    name="Status_Effect_Tracker"
+    author="ChatGPT"
+    id="91c7e4a23bf84d1aa0e9c562"
+    language="Lua"
+    purpose="Resizable themed status-effect tracker with escalating alerts"
+    date_written="2026-09-07"
+    version="1.5"
+    save_state="y"
+>
+
+<description trim="y">
+<![CDATA[
+STATUS EFFECT TRACKER
+
+Parses the status-effect snapshot line from the HP/MP readout, e.g.:
+
+    <<Protect Shell Regen >>
+    <<None>>
+
+Beneficial effects are shown in green.
+Harmful effects are shown in red.
+Unknown effects are shown neutrally.
+
+Alert escalation:
+    0 harmful: normal
+    1 harmful: highlighted only
+    2 harmful: flashing border/title + 1 ALERT
+    3 harmful: faster flashing + 2 ALERTs
+    4 harmful: 3 ALERTs
+    5+ harmful: progressively more ALERTs, capped for readability
+
+Commands:
+    statuswin show
+    statuswin hide
+
+Shared themes:
+    theme default
+    theme classic
+    theme amber
+]]>
+
+Modular theme client: colours are supplied by UI_Theme_Controller v2.0 when available.
+</description>
+
+</plugin>
+
+
+<triggers>
+
+    <trigger
+        name="StatusEffectLine"
+        enabled="y"
+        regexp="y"
+        match="^&lt;&lt;(.+)&gt;&gt;$"
+        send_to="12"
+        script="OnStatusLine"
+        sequence="100"
+    />
+
+</triggers>
+
+
+<aliases>
+
+    <alias
+        name="StatusWindow_Show"
+        script="statuswin_show"
+        match="^statuswin show$"
+        regexp="y"
+        ignore_case="y"
+        enabled="y"
+        sequence="100"
+    ></alias>
+
+    <alias
+        name="StatusWindow_Hide"
+        script="statuswin_hide"
+        match="^statuswin hide$"
+        regexp="y"
+        ignore_case="y"
+        enabled="y"
+        sequence="100"
+    ></alias>
+
+</aliases>
+
+
+<timers>
+
+    <timer
+        name="StatusAlertFlash"
+        second="0.5"
+        enabled="y"
+        script="StatusAlertTick"
+    ></timer>
+
+</timers>
+
+
+<script>
+<![CDATA[
+
+require "movewindow"
+
+Win = GetPluginID()
+
+
+--------------------------------------------------
+-- CONFIG
+--------------------------------------------------
+
+WINDOW_WIDTH = 195
+WINDOW_HEIGHT = 193
+
+TITLE_HEIGHT = 22
+ROW_HEIGHT = 20
+
+FONT_NAME = "Lucida Console"
+BODY_FONT_SIZE = 9
+TITLE_FONT_SIZE = 9
+
+INSET = 8
+
+MAX_ALERT_WORDS = 6
+
+--------------------------------------------------
+-- RESIZABLE MINIWINDOW
+--------------------------------------------------
+
+RESIZE_GRIP_SIZE = 14
+MIN_WINDOW_WIDTH = 165
+MIN_WINDOW_HEIGHT = 140
+resizeActive = false
+
+function LoadWindowSize()
+    local w = tonumber(GetVariable("status_width"))
+    local h = tonumber(GetVariable("status_height"))
+    if w then WINDOW_WIDTH = math.max(MIN_WINDOW_WIDTH, math.floor(w)) end
+    if h then WINDOW_HEIGHT = math.max(MIN_WINDOW_HEIGHT, math.floor(h)) end
+end
+
+function SaveWindowSize()
+    SetVariable("status_width", tostring(math.floor(WINDOW_WIDTH)))
+    SetVariable("status_height", tostring(math.floor(WINDOW_HEIGHT)))
+end
+
+function ResizeMouseDown(flags, hotspot_id)
+    resizeActive = true
+    return 0
+end
+
+function UpdateResizeFromMouse()
+    local mouseX = tonumber(WindowInfo(Win, 17))
+    local mouseY = tonumber(WindowInfo(Win, 18))
+    local left = tonumber(WindowInfo(Win, 10)) or tonumber(WindowInfo(Win, 1)) or 0
+    local top = tonumber(WindowInfo(Win, 11)) or tonumber(WindowInfo(Win, 2)) or 0
+    if not mouseX or not mouseY then return false end
+    local newW = math.max(MIN_WINDOW_WIDTH, math.floor(mouseX - left + 1))
+    local newH = math.max(MIN_WINDOW_HEIGHT, math.floor(mouseY - top + 1))
+    if newW == WINDOW_WIDTH and newH == WINDOW_HEIGHT then return false end
+    WINDOW_WIDTH, WINDOW_HEIGHT = newW, newH
+    WindowResize(Win, WINDOW_WIDTH, WINDOW_HEIGHT, C_BACKGROUND)
+    Redraw()
+    return true
+end
+
+function ResizeMouseMove(flags, hotspot_id)
+    if resizeActive then UpdateResizeFromMouse() end
+    SetCursor(miniwin.cursor_nw_se_arrow)
+    return 0
+end
+
+function ResizeMouseUp(flags, hotspot_id)
+    if resizeActive then UpdateResizeFromMouse() end
+    resizeActive = false
+    SaveWindowSize()
+    DrawWindow()
+    return 0
+end
+
+function InstallResizeHandle()
+    WindowDeleteHotspot(Win, "00_resize")
+    local l = math.max(0, WINDOW_WIDTH - RESIZE_GRIP_SIZE)
+    local t = math.max(0, WINDOW_HEIGHT - RESIZE_GRIP_SIZE)
+    WindowAddHotspot(Win, "00_resize", l, t, WINDOW_WIDTH, WINDOW_HEIGHT,
+        "", "", "ResizeMouseDown", "", "", "Drag to resize", miniwin.cursor_nw_se_arrow, 0)
+    WindowDragHandler(Win, "00_resize", "ResizeMouseMove", "ResizeMouseUp", 0)
+    WindowLine(Win, WINDOW_WIDTH-11, WINDOW_HEIGHT-3, WINDOW_WIDTH-3, WINDOW_HEIGHT-11, C_BORDER or 0, miniwin.pen_solid, 1)
+    WindowLine(Win, WINDOW_WIDTH-7, WINDOW_HEIGHT-3, WINDOW_WIDTH-3, WINDOW_HEIGHT-7, C_BORDER or 0, miniwin.pen_solid, 1)
+end
+
+
+--------------------------------------------------
+-- EFFECT TABLES
+--------------------------------------------------
+
+positiveEffects = {
+
+    ["Convalescence"] = true,
+    ["Double"] = true,
+    ["Haste"] = true,
+    ["Killer"] = true,
+    ["MP Regen"] = true,
+    ["Permanence"] = true,
+    ["Praise"] = true,
+    ["Preach"] = true,
+    ["Protect"] = true,
+    ["Protectga"] = true,
+    ["Reflect"] = true,
+    ["Refreshment"] = true,
+    ["Regen"] = true,
+    ["Reraise"] = true,
+    ["Sentinel"] = true,
+    ["Shell"] = true,
+    ["Shellga"] = true,
+    ["Spellspring"] = true,
+    ["Triple"] = true,
+    ["Veil"] = true,
+
+    ["Beast"] = true,
+    ["Bubble"] = true,
+    ["Counter Force"] = true,
+    ["Dragon Force"] = true,
+    ["Focus"] = true,
+    ["Mighty Guard"] = true,
+}
+
+
+negativeEffects = {
+
+    ["Berserk"] = true,
+    ["Blind"] = true,
+    ["Curse"] = true,
+    ["Engulf"] = true,
+    ["HP Leak"] = true,
+    ["Immobilize"] = true,
+    ["Imp"] = true,
+    ["Mini"] = true,
+    ["Paralyze"] = true,
+    ["Petrify"] = true,
+    ["Poison"] = true,
+    ["Provoke"] = true,
+    ["Silence"] = true,
+    ["Sleep"] = true,
+    ["Slow"] = true,
+    ["Stop"] = true,
+    ["Trouble"] = true,
+    ["Zombie"] = true,
+
+    ["Dischord"] = true,
+    ["Disease"] = true,
+}
+
+
+--------------------------------------------------
+-- BUILD SORTED NAME LISTS FOR LONGEST-FIRST PARSE
+--------------------------------------------------
+
+allKnownEffects = {}
+
+for name, _ in pairs(
+    positiveEffects
+) do
+
+    table.insert(
+        allKnownEffects,
+        name
+    )
+end
+
+
+for name, _ in pairs(
+    negativeEffects
+) do
+
+    table.insert(
+        allKnownEffects,
+        name
+    )
+end
+
+
+table.sort(
+    allKnownEffects,
+    function(a,b)
+
+        if #a == #b then
+            return a < b
+        end
+
+        return #a > #b
+    end
+)
+
+
+--------------------------------------------------
+-- THEMES
+--------------------------------------------------
+
+THEME_CONTROLLER_ID =
+    "43c8d047be7a418ba5e86916"
+
+THEME_BROADCAST_MESSAGE = 9042
+
+
+
+--------------------------------------------------
+-- MODULAR THEME CLIENT
+--
+-- The controller owns the real palette. The local THEMES table
+-- below is retained only as a safe fallback if the controller
+-- is unavailable.
+--------------------------------------------------
+
+local THEME_PROFILE =
+    "status"
+
+
+function ThemeColour(
+    role,
+    fallback
+)
+
+    local rc,
+          value =
+        CallPlugin(
+            THEME_CONTROLLER_ID,
+            "GetThemeColour",
+            THEME_PROFILE,
+            role
+        )
+
+
+    if rc ==
+       error_code.eOK and
+       type(
+           value
+       ) ==
+       "string" and
+       value ~=
+       ""
+    then
+
+        return
+            ColourNameToRGB(
+                value
+            )
+
+    end
+
+
+    return
+        ColourNameToRGB(
+            fallback
+        )
+end
+
+
+THEMES = {
+
+    classic = {
+
+        background = "#000000",
+        border = "#808080",
+        title_bar = "darkslategray",
+        title = "gold",
+
+        positive = "#55FF55",
+        negative = "#FF5555",
+        unknown = "#A0A0A0",
+
+        separator = "#282828",
+
+        alert_bright = "#FF3030",
+        alert_dark = "#601010",
+        alert_text = "#FFFFFF"
+    },
+
+    amber = {
+
+        background = "#050301",
+        border = "#6B3D18",
+        title_bar = "#160B03",
+        title = "#FFB347",
+
+        positive = "#7FFF7F",
+        negative = "#FF5A3C",
+        unknown = "#A8713A",
+
+        separator = "#2D1809",
+
+        alert_bright = "#FF3B22",
+        alert_dark = "#5C1208",
+        alert_text = "#FFD7A3"
+    },
+
+    default = {
+
+        background = "#000500",
+        border = "#285B28",
+        title_bar = "#061306",
+        title = "#9AFF82",
+
+        positive = "#67FF67",
+        negative = "#FF4D4D",
+        unknown = "#5A8B5A",
+
+        separator = "#102A10",
+
+        alert_bright = "#FF3D3D",
+        alert_dark = "#5A1010",
+        alert_text = "#D7FFD7"
+    }
+}
+
+
+function LoadTheme()
+
+    local themeName =
+        GetPluginVariable(
+            THEME_CONTROLLER_ID,
+            "theme"
+        )
+
+
+    if not THEMES[
+        themeName
+    ] then
+
+        themeName =
+            "default"
+
+    end
+
+
+    local T =
+        THEMES[
+            themeName
+        ]
+
+
+    C_BACKGROUND =
+        ThemeColour("background", T.background)
+
+    C_BORDER =
+        ThemeColour("border", T.border)
+
+    C_TITLE_BAR =
+        ThemeColour("title_bar", T.title_bar)
+
+    C_TITLE =
+        ThemeColour("title", T.title)
+
+    C_POSITIVE =
+        ThemeColour("positive", T.positive)
+
+    C_NEGATIVE =
+        ThemeColour("negative", T.negative)
+
+    C_UNKNOWN =
+        ThemeColour("unknown", T.unknown)
+
+    C_SEPARATOR =
+        ThemeColour("separator", T.separator)
+
+    C_ALERT_BRIGHT =
+        ThemeColour("alert_bright", T.alert_bright)
+
+    C_ALERT_DARK =
+        ThemeColour("alert_dark", T.alert_dark)
+
+    C_ALERT_TEXT =
+        ThemeColour("alert_text", T.alert_text)
+end
+
+
+--------------------------------------------------
+-- STATE
+--------------------------------------------------
+
+windowinfo = ""
+
+effects = {}
+
+negativeCount = 0
+
+flashOn = false
+
+
+--------------------------------------------------
+-- HELPERS
+--------------------------------------------------
+
+function Trim(s)
+
+    if not s then
+        return ""
+    end
+
+
+    return
+        s:match(
+            "^%s*(.-)%s*$"
+        ) or s
+end
+
+
+function StartsWithEffect(
+    text,
+    effectName
+)
+
+    if text:sub(
+        1,
+        #effectName
+    ) ~= effectName
+    then
+
+        return false
+    end
+
+
+    if #text ==
+       #effectName
+    then
+
+        return true
+    end
+
+
+    local nextChar =
+        text:sub(
+            #effectName + 1,
+            #effectName + 1
+        )
+
+
+    return
+        nextChar == " "
+end
+
+
+function ClassifyEffect(name)
+
+    if positiveEffects[
+        name
+    ] then
+
+        return "positive"
+
+    end
+
+
+    if negativeEffects[
+        name
+    ] then
+
+        return "negative"
+
+    end
+
+
+    return "unknown"
+end
+
+
+--------------------------------------------------
+-- PARSE STATUS SNAPSHOT
+--------------------------------------------------
+
+function ParseStatusText(
+    statusText
+)
+
+    statusText =
+        Trim(
+            statusText
+        )
+
+
+    if statusText == "" or
+       statusText == "None"
+    then
+
+        return {}
+    end
+
+
+    local result = {}
+
+    local remaining =
+        statusText
+
+
+    while remaining ~= "" do
+
+        remaining =
+            Trim(
+                remaining
+            )
+
+
+        local matchedName =
+            nil
+
+
+        for _, effectName in ipairs(
+            allKnownEffects
+        ) do
+
+            if StartsWithEffect(
+                remaining,
+                effectName
+            ) then
+
+                matchedName =
+                    effectName
+
+                break
+            end
+
+        end
+
+
+        if matchedName then
+
+            table.insert(
+                result,
+                {
+                    name =
+                        matchedName,
+
+                    kind =
+                        ClassifyEffect(
+                            matchedName
+                        )
+                }
+            )
+
+
+            remaining =
+                Trim(
+                    remaining:sub(
+                        #matchedName + 1
+                    )
+                )
+
+        else
+
+            --------------------------------------------------
+            -- Unknown token fallback.
+            --
+            -- Since unknown multi-word effects cannot be
+            -- inferred safely, preserve one token at a time
+            -- rather than guessing.
+            --------------------------------------------------
+
+            local token,
+                  rest =
+                remaining:match(
+                    "^(%S+)%s*(.*)$"
+                )
+
+
+            if not token then
+                break
+            end
+
+
+            table.insert(
+                result,
+                {
+                    name =
+                        token,
+
+                    kind =
+                        "unknown"
+                }
+            )
+
+
+            remaining =
+                rest or ""
+        end
+
+    end
+
+
+    return result
+end
+
+
+function RecountNegatives()
+
+    negativeCount = 0
+
+
+    for _, effect in ipairs(
+        effects
+    ) do
+
+        if effect.kind ==
+           "negative"
+        then
+
+            negativeCount =
+                negativeCount +
+                1
+        end
+
+    end
+end
+
+
+--------------------------------------------------
+-- INPUT TRIGGER
+--------------------------------------------------
+
+function OnStatusLine(
+    name,
+    line,
+    wildcards
+)
+
+    local body =
+        wildcards[1] or ""
+
+
+    --------------------------------------------------
+    -- Reject the HP/MP line and overall-condition line.
+    -- The actual status snapshot contains neither of
+    -- these markers.
+    --------------------------------------------------
+
+    if body:match(
+        "^HP:%s*%d+/%d+MP:%d+/%d+"
+    ) then
+
+        return
+    end
+
+
+    if body:find(
+        "OVERALL CONDITION:",
+        1,
+        true
+    ) then
+
+        return
+    end
+
+
+    effects =
+        ParseStatusText(
+            body
+        )
+
+
+    RecountNegatives()
+
+
+    if negativeCount <
+       2
+    then
+
+        flashOn =
+            false
+    end
+
+
+    DrawWindow()
+end
+
+
+--------------------------------------------------
+-- ALERT TIMER
+--------------------------------------------------
+
+function StatusAlertTick()
+
+    if negativeCount <
+       2
+    then
+
+        if flashOn then
+
+            flashOn =
+                false
+
+            DrawWindow()
+        end
+
+        return
+    end
+
+
+    flashOn =
+        not flashOn
+
+
+    DrawWindow()
+end
+
+
+--------------------------------------------------
+-- ALERT WORD COUNT
+--------------------------------------------------
+
+function AlertWordCount()
+
+    if negativeCount < 2 then
+        return 0
+    end
+
+
+    return
+        math.min(
+            MAX_ALERT_WORDS,
+            negativeCount - 1
+        )
+end
+
+
+--------------------------------------------------
+-- ESUNA BUTTON
+--------------------------------------------------
+
+function UseEsuna(
+    flags,
+    hotspot_id
+)
+
+    Send("use whitemagic esuna")
+end
+
+
+--------------------------------------------------
+-- WINDOW DRAW
+--------------------------------------------------
+
+function DrawWindow()
+
+    if not windowinfo then
+        return
+    end
+
+    WindowDeleteHotspot(
+        Win,
+        "status_esuna"
+    )
+
+
+    local activeBorder =
+        C_BORDER
+
+
+    local activeTitleBar =
+        C_TITLE_BAR
+
+
+    local activeTitle =
+        C_TITLE
+
+
+    if negativeCount >= 2 then
+
+        if flashOn then
+
+            activeBorder =
+                C_ALERT_BRIGHT
+
+            activeTitleBar =
+                C_ALERT_BRIGHT
+
+            activeTitle =
+                C_ALERT_TEXT
+
+        else
+
+            activeBorder =
+                C_ALERT_DARK
+
+            activeTitleBar =
+                C_ALERT_DARK
+
+            activeTitle =
+                C_ALERT_TEXT
+
+        end
+
+    end
+
+
+    WindowRectOp(
+        Win,
+        miniwin.rect_fill,
+        0,
+        0,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        C_BACKGROUND
+    )
+
+
+    --------------------------------------------------
+    -- TITLE BAR
+    --------------------------------------------------
+
+    WindowRectOp(
+        Win,
+        miniwin.rect_fill,
+        0,
+        0,
+        WINDOW_WIDTH,
+        TITLE_HEIGHT,
+        activeTitleBar
+    )
+
+
+    local titleText =
+        "STATUS"
+
+
+    if negativeCount >= 2 then
+
+        titleText =
+            "STATUS ALERT"
+    end
+
+
+    WindowText(
+        Win,
+        "title"..Win,
+        titleText,
+        INSET,
+        4,
+        WINDOW_WIDTH - INSET,
+        TITLE_HEIGHT,
+        activeTitle,
+        false
+    )
+
+
+    --------------------------------------------------
+    -- ESUNA BUTTON
+    --------------------------------------------------
+
+    local buttonLeft =
+        INSET
+
+    local buttonTop =
+        TITLE_HEIGHT + 5
+
+    local buttonRight =
+        WINDOW_WIDTH - INSET
+
+    local buttonBottom =
+        buttonTop + ROW_HEIGHT + 4
+
+
+    WindowRectOp(
+        Win,
+        miniwin.rect_fill,
+        buttonLeft,
+        buttonTop,
+        buttonRight,
+        buttonBottom,
+        C_SEPARATOR
+    )
+
+
+    WindowRectOp(
+        Win,
+        miniwin.rect_frame,
+        buttonLeft,
+        buttonTop,
+        buttonRight,
+        buttonBottom,
+        activeBorder
+    )
+
+
+    local esunaWidth =
+        WindowTextWidth(
+            Win,
+            "title"..Win,
+            "Esuna"
+        )
+
+
+    WindowText(
+        Win,
+        "title"..Win,
+        "Esuna",
+        math.floor(
+            (
+                buttonLeft +
+                buttonRight -
+                esunaWidth
+            ) /
+            2
+        ),
+        buttonTop + 5,
+        buttonRight,
+        buttonBottom,
+        C_TITLE,
+        false
+    )
+
+
+    WindowAddHotspot(
+        Win,
+        "status_esuna",
+        buttonLeft,
+        buttonTop,
+        buttonRight,
+        buttonBottom,
+        "",
+        "",
+        "",
+        "",
+        "UseEsuna",
+        "Cast Esuna",
+        miniwin.cursor_hand,
+        0
+    )
+
+
+    --------------------------------------------------
+    -- EFFECT LIST
+    --------------------------------------------------
+
+    local y =
+        buttonBottom + 5
+
+
+    if #effects == 0 then
+
+        WindowText(
+            Win,
+            "body"..Win,
+            "None",
+            INSET,
+            y,
+            WINDOW_WIDTH - INSET,
+            y + ROW_HEIGHT,
+            C_UNKNOWN,
+            false
+        )
+
+    else
+
+        for _, effect in ipairs(
+            effects
+        ) do
+
+            local colour =
+                C_UNKNOWN
+
+
+            if effect.kind ==
+               "positive"
+            then
+
+                colour =
+                    C_POSITIVE
+
+            elseif effect.kind ==
+                   "negative"
+            then
+
+                colour =
+                    C_NEGATIVE
+
+            end
+
+
+            WindowText(
+                Win,
+                "body"..Win,
+                effect.name,
+                INSET,
+                y,
+                WINDOW_WIDTH - INSET,
+                y + ROW_HEIGHT,
+                colour,
+                false
+            )
+
+
+            y =
+                y +
+                ROW_HEIGHT
+
+
+            if y >
+               WINDOW_HEIGHT -
+               28
+            then
+
+                break
+            end
+
+        end
+
+    end
+
+
+    --------------------------------------------------
+    -- ESCALATING ALERT WORDS
+    --------------------------------------------------
+
+    local count =
+        AlertWordCount()
+
+
+    if count > 0 then
+
+        local alertY =
+            WINDOW_HEIGHT -
+            20
+
+
+        local totalWidth =
+            WINDOW_WIDTH -
+            (INSET * 2)
+
+
+        local slotWidth =
+            totalWidth /
+            count
+
+
+        for i = 1,
+            count
+        do
+
+            local left =
+                INSET +
+                math.floor(
+                    (i - 1) *
+                    slotWidth
+                )
+
+
+            local right =
+                INSET +
+                math.floor(
+                    i *
+                    slotWidth
+                )
+
+
+            WindowText(
+                Win,
+                "title"..Win,
+                "ALERT",
+                left,
+                alertY,
+                right,
+                WINDOW_HEIGHT,
+                flashOn
+                    and C_ALERT_TEXT
+                    or C_NEGATIVE,
+                false
+            )
+
+        end
+
+    end
+
+
+    --------------------------------------------------
+    -- BORDER
+    --------------------------------------------------
+
+    WindowRectOp(
+        Win,
+        miniwin.rect_frame,
+        0,
+        0,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        activeBorder
+    )
+
+
+    InstallResizeHandle()
+    Redraw()
+end
+
+
+--------------------------------------------------
+-- INSTALL
+--------------------------------------------------
+
+function OnPluginInstall()
+
+    LoadTheme()
+    LoadWindowSize()
+
+
+    check(
+        WindowCreate(
+            Win,
+            0,
+            0,
+            WINDOW_WIDTH,
+            WINDOW_HEIGHT,
+            0,
+            0,
+            C_BACKGROUND
+        )
+    )
+
+
+    check(
+        WindowFont(
+            Win,
+            "body"..Win,
+            FONT_NAME,
+            BODY_FONT_SIZE
+        )
+    )
+
+
+    check(
+        WindowFont(
+            Win,
+            "title"..Win,
+            FONT_NAME,
+            TITLE_FONT_SIZE,
+            true
+        )
+    )
+
+
+    windowinfo =
+        movewindow.install(
+            Win,
+            miniwin.pos_top_right,
+            miniwin.create_absolute_location,
+            true
+        )
+
+
+    check(
+        WindowCreate(
+            Win,
+            windowinfo.window_left,
+            windowinfo.window_top,
+            WINDOW_WIDTH,
+            WINDOW_HEIGHT,
+            windowinfo.window_mode,
+            windowinfo.window_flags,
+            C_BACKGROUND
+        )
+    )
+
+
+    --------------------------------------------------
+    -- Explicit title-bar drag region.
+    --------------------------------------------------
+
+    movewindow.add_drag_handler(
+        Win,
+        0,
+        0,
+        0,
+        TITLE_HEIGHT
+    )
+
+
+    DrawWindow()
+
+
+    WindowShow(
+        Win,
+        true
+    )
+end
+
+
+--------------------------------------------------
+-- SAVE STATE
+--------------------------------------------------
+
+function OnPluginSaveState()
+
+    SaveWindowSize()
+
+    movewindow.save_state(
+        Win
+    )
+
+end
+
+
+--------------------------------------------------
+-- ENABLE / DISABLE
+--------------------------------------------------
+
+function OnPluginEnable()
+
+    LoadTheme()
+
+    DrawWindow()
+
+    WindowShow(
+        Win,
+        true
+    )
+end
+
+
+function OnPluginDisable()
+
+    WindowShow(
+        Win,
+        false
+    )
+end
+
+
+--------------------------------------------------
+-- COMMANDS
+--------------------------------------------------
+
+function statuswin_show(
+    name,
+    line,
+    wildcards
+)
+
+    DrawWindow()
+
+    WindowShow(
+        Win,
+        true
+    )
+end
+
+
+function statuswin_hide(
+    name,
+    line,
+    wildcards
+)
+
+    WindowShow(
+        Win,
+        false
+    )
+end
+
+
+--------------------------------------------------
+-- THEME BROADCAST
+--------------------------------------------------
+
+function OnPluginBroadcast(
+    msg,
+    id,
+    name,
+    text
+)
+
+    if msg ~=
+       THEME_BROADCAST_MESSAGE
+    then
+
+        return
+    end
+
+
+    if id ~=
+       THEME_CONTROLLER_ID
+    then
+
+        return
+    end
+
+
+    LoadTheme()
+
+    DrawWindow()
+end
+
+
+
+
+--------------------------------------------------
+-- PLUGIN CONTROLLER LAYOUT API
+--------------------------------------------------
+
+function ManagedLayoutParse(spec)
+    local windowName, sx, sy, sw, sh =
+        tostring(spec or ""):match("^([^\t]+)\t(-?%d+)\t(-?%d+)\t(%d+)\t(%d+)$")
+    if not windowName then return nil end
+    return windowName, tonumber(sx), tonumber(sy), tonumber(sw), tonumber(sh)
+end
+
+function ManagedLayoutSetMoveWindowInfo(info, winName, x, y)
+    if type(info) ~= "table" then return end
+    info.window_left = x
+    info.window_top = y
+    info.window_mode = tonumber(WindowInfo(winName, 7)) or info.window_mode or miniwin.pos_top_left
+    info.window_flags = tonumber(WindowInfo(winName, 8)) or info.window_flags or miniwin.create_absolute_location
+end
+
+function GetManagedLayoutWindows()
+    return Win
+end
+
+function ApplyManagedLayout(spec)
+    local windowName, x, y, w, h = ManagedLayoutParse(spec)
+    if windowName ~= Win then return "wrong window" end
+
+    WINDOW_WIDTH = math.max(MIN_WINDOW_WIDTH, math.floor(w))
+    WINDOW_HEIGHT = math.max(MIN_WINDOW_HEIGHT, math.floor(h))
+    SaveWindowSize()
+
+    WindowResize(
+        Win,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        C_BACKGROUND
+    )
+
+    ManagedLayoutSetMoveWindowInfo(windowinfo, Win, x, y)
+    DrawWindow()
+
+    local mode = type(windowinfo) == "table" and windowinfo.window_mode or miniwin.pos_top_left
+    local flags = type(windowinfo) == "table" and windowinfo.window_flags or miniwin.create_absolute_location
+    WindowPosition(Win, x, y, mode, flags)
+    if movewindow then movewindow.save_state(Win) end
+    pcall(SaveState)
+    Redraw()
+    return "ok"
+end
+
+]]>
+</script>
+
+</muclient>

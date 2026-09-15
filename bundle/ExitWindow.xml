@@ -1,0 +1,1948 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+
+<muclient>
+
+<plugin
+   name="ExitWindow"
+   author="ChatGPT"
+   id="a1b2c3d4e5f60718293a4b5c"
+   language="Lua"
+   purpose="Resizable graphical room-exit compass"
+   save_state="y"
+   date_written="2026-09-07"
+   requires="4.59"
+   version="5.3"
+   >
+
+<description trim="y">
+<![CDATA[
+Displays room exits in a horizontal graphical compass.
+The title bar shows the current room name and can be dragged.
+Supports Default (green terminal), Classic, and Amber shared UI themes.
+The window position is remembered between sessions.
+]]>
+
+Modular theme client: colours are supplied by UI_Theme_Controller v2.0 when available.
+</description>
+
+</plugin>
+
+
+<triggers>
+
+<trigger
+   name="room_exits"
+   enabled="y"
+   regexp="y"
+   match="^(.+?)\s+\[exits:\s*(.*?)\]$"
+   send_to="12"
+   script="OnExits"
+   sequence="100"
+/>
+
+</triggers>
+
+
+<script>
+<![CDATA[
+
+
+------------------------------------------------------------
+-- WINDOW / FONT IDS
+------------------------------------------------------------
+
+local win = "ExitWindow"
+
+local font         = "ExitWindowFont"
+local small_font   = "ExitWindowSmallFont"
+
+local label_window = "ExitWindowLabel"
+local label_font   = "ExitWindowLabelFont"
+local label_image  = "ExitWindowLabelImage"
+
+
+------------------------------------------------------------
+-- WINDOW SIZE
+------------------------------------------------------------
+
+local MIN_WINDOW_WIDTH = 300
+local MIN_WINDOW_HEIGHT = 180
+local WINDOW_WIDTH  = math.max(MIN_WINDOW_WIDTH, tonumber(GetVariable("exit_width")) or 390)
+local WINDOW_HEIGHT = math.max(MIN_WINDOW_HEIGHT, tonumber(GetVariable("exit_height")) or 215)
+local RESIZE_GRIP_SIZE = 14
+local resize_active = false
+
+
+------------------------------------------------------------
+-- STATE
+------------------------------------------------------------
+
+local exits = {}
+
+local currentRoomName = "EXIT COMPASS"
+
+local window_x = tonumber(GetVariable("window_x")) or 50
+local window_y = tonumber(GetVariable("window_y")) or 50
+
+local drag_start_x = 0
+local drag_start_y = 0
+
+
+------------------------------------------------------------
+-- SHARED UI THEMES
+------------------------------------------------------------
+
+local THEME_CONTROLLER_ID =
+    "43c8d047be7a418ba5e86916"
+
+local THEME_BROADCAST_MESSAGE = 9042
+
+
+--------------------------------------------------
+-- MODULAR THEME CLIENT
+--
+-- The controller owns the real palette. The local THEMES table
+-- below is retained only as a safe fallback if the controller
+-- is unavailable.
+--------------------------------------------------
+
+local THEME_PROFILE =
+    "exit"
+
+
+function ThemeColour(
+    role,
+    fallback
+)
+
+    local rc,
+          value =
+        CallPlugin(
+            THEME_CONTROLLER_ID,
+            "GetThemeColour",
+            THEME_PROFILE,
+            role
+        )
+
+
+    if rc ==
+       error_code.eOK and
+       type(
+           value
+       ) ==
+       "string" and
+       value ~=
+       ""
+    then
+
+        return
+            ColourNameToRGB(
+                value
+            )
+
+    end
+
+
+    return
+        ColourNameToRGB(
+            fallback
+        )
+end
+
+
+local THEMES = {
+
+    --------------------------------------------------------
+    -- CLASSIC
+    --
+    -- This intentionally preserves the original compass
+    -- colours exactly.
+    --------------------------------------------------------
+
+    classic = {
+
+        background = "black",
+        panel       = "darkslategray",
+        border      = "gray",
+
+        face        = "white",
+        outline     = "black",
+        tick        = "black",
+        inactive    = "black",
+
+        dark        = "darkgray",
+        gray        = "gray",
+        dim         = "dimgray",
+        lightgray   = "lightgray",
+
+        title       = "gold",
+
+        active      = "cyan",
+        active_dark = "darkcyan",
+
+        other       = "lightgray"
+    },
+
+
+    --------------------------------------------------------
+    -- AMBER TERMINAL
+    --
+    -- Near-black brown CRT background, muted amber chrome,
+    -- and brighter phosphor for active information.
+    --------------------------------------------------------
+
+    amber = {
+
+        background = "#050301",
+        panel       = "#160B03",
+        border      = "#6B3D18",
+
+        face        = "#080401",
+        outline     = "#A65F20",
+        tick        = "#B86A24",
+        inactive    = "#080401",
+
+        dark        = "#6B3D18",
+        gray        = "#9A571D",
+        dim         = "#5A3213",
+        lightgray   = "#D9822B",
+
+        title       = "#FFB347",
+
+        active      = "#FF9D26",
+        active_dark = "#7A3D08",
+
+        other       = "#E38B30"
+    },
+
+
+    --------------------------------------------------------
+    -- DEFAULT / GREEN TERMINAL
+    --
+    -- Very dark green CRT background, subdued green grid
+    -- lines, and bright phosphor for active information.
+    --------------------------------------------------------
+
+    default = {
+
+        background = "#000500",
+        panel       = "#061306",
+        border      = "#285B28",
+
+        face        = "#000800",
+        outline     = "#3C8A3C",
+        tick        = "#4EA34E",
+        inactive    = "#000800",
+
+        dark        = "#245324",
+        gray        = "#397A39",
+        dim         = "#1C451C",
+        lightgray   = "#67C967",
+
+        title       = "#9AFF82",
+
+        active      = "#67FF67",
+        active_dark = "#176B24",
+
+        other       = "#70D970"
+    }
+
+}
+
+
+------------------------------------------------------------
+-- ACTIVE COLOUR PALETTE
+------------------------------------------------------------
+
+local C = {}
+
+
+function LoadTheme()
+
+    local theme =
+        GetPluginVariable(
+            THEME_CONTROLLER_ID,
+            "theme"
+        )
+
+    if not THEMES[theme] then
+        theme = "default"
+    end
+
+    local T = THEMES[theme]
+
+    C.background   = ThemeColour("background", T.background)
+    C.panel        = ThemeColour("panel", T.panel)
+    C.border       = ThemeColour("border", T.border)
+
+    C.face         = ThemeColour("face", T.face)
+    C.outline      = ThemeColour("outline", T.outline)
+    C.tick         = ThemeColour("tick", T.tick)
+    C.inactive     = ThemeColour("inactive", T.inactive)
+
+    C.dark         = ThemeColour("dark", T.dark)
+    C.gray         = ThemeColour("gray", T.gray)
+    C.dim          = ThemeColour("dim", T.dim)
+    C.lightgray    = ThemeColour("lightgray", T.lightgray)
+
+    C.title        = ThemeColour("title", T.title)
+
+    C.active       = ThemeColour("active", T.active)
+    C.active_dark  = ThemeColour("active_dark", T.active_dark)
+
+    C.other        = ThemeColour("other", T.other)
+
+    --------------------------------------------------------
+    -- Compatibility name used elsewhere in the existing
+    -- drawing code and by the rotated-label scratch window.
+    --------------------------------------------------------
+
+    C.black = C.background
+end
+
+
+------------------------------------------------------------
+-- DIRECTIONS
+------------------------------------------------------------
+
+local directions = {
+
+    {
+        key="n",
+        label="N",
+        names={
+            north=true,
+            n=true
+        },
+        angle=-math.pi/2
+    },
+
+    {
+        key="ne",
+        label="NE",
+        names={
+            northeast=true,
+            ne=true
+        },
+        angle=-math.pi/4
+    },
+
+    {
+        key="e",
+        label="E",
+        names={
+            east=true,
+            e=true
+        },
+        angle=0
+    },
+
+    {
+        key="se",
+        label="SE",
+        names={
+            southeast=true,
+            se=true
+        },
+        angle=math.pi/4
+    },
+
+    {
+        key="s",
+        label="S",
+        names={
+            south=true,
+            s=true
+        },
+        angle=math.pi/2
+    },
+
+    {
+        key="sw",
+        label="SW",
+        names={
+            southwest=true,
+            sw=true
+        },
+        angle=3*math.pi/4
+    },
+
+    {
+        key="w",
+        label="W",
+        names={
+            west=true,
+            w=true
+        },
+        angle=math.pi
+    },
+
+    {
+        key="nw",
+        label="NW",
+        names={
+            northwest=true,
+            nw=true
+        },
+        angle=-3*math.pi/4
+    }
+
+}
+
+
+------------------------------------------------------------
+-- CLICKABLE EXIT HOTSPOTS
+------------------------------------------------------------
+
+local exit_hotspots = {}
+
+function ClearExitHotspots()
+    for hotspot_id, _ in pairs(exit_hotspots) do
+        WindowDeleteHotspot(win, hotspot_id)
+    end
+    exit_hotspots = {}
+end
+
+function ClickExit(flags, hotspot_id)
+    local command = exit_hotspots[hotspot_id]
+    if not command or command == "" then
+        return
+    end
+    Send(command)
+end
+
+function AddExitHotspot(
+    hotspot_id,
+    left,
+    top,
+    right,
+    bottom,
+    command,
+    tooltip
+)
+    exit_hotspots[hotspot_id] = command
+
+    WindowAddHotspot(
+        win,
+        hotspot_id,
+        left,
+        top,
+        right,
+        bottom,
+        "",
+        "",
+        "",
+        "",
+        "ClickExit",
+        tooltip or command,
+        miniwin.cursor_hand,
+        0
+    )
+end
+
+------------------------------------------------------------
+-- DIRECTION LOOKUP
+------------------------------------------------------------
+
+function FindDirection(exit_name)
+
+    exit_name = string.lower(exit_name)
+
+    for _, direction in ipairs(directions) do
+
+        if direction.names[exit_name] then
+            return direction
+        end
+
+    end
+
+    return nil
+end
+
+
+------------------------------------------------------------
+-- SAVE WINDOW POSITION
+------------------------------------------------------------
+
+
+
+------------------------------------------------------------
+-- RESIZING
+------------------------------------------------------------
+
+local function SaveWindowSize()
+    SetVariable("exit_width", tostring(math.floor(WINDOW_WIDTH)))
+    SetVariable("exit_height", tostring(math.floor(WINDOW_HEIGHT)))
+end
+
+function ResizeMouseDown(flags, hotspot_id) resize_active = true; return 0 end
+
+local function UpdateResizeFromMouse()
+    local mouse_x = tonumber(WindowInfo(win, 17))
+    local mouse_y = tonumber(WindowInfo(win, 18))
+    local left = tonumber(WindowInfo(win, 10)) or tonumber(WindowInfo(win, 1)) or window_x
+    local top = tonumber(WindowInfo(win, 11)) or tonumber(WindowInfo(win, 2)) or window_y
+    if not mouse_x or not mouse_y then return false end
+    local new_w = math.max(MIN_WINDOW_WIDTH, math.floor(mouse_x - left + 1))
+    local new_h = math.max(MIN_WINDOW_HEIGHT, math.floor(mouse_y - top + 1))
+    if new_w == WINDOW_WIDTH and new_h == WINDOW_HEIGHT then return false end
+    WINDOW_WIDTH, WINDOW_HEIGHT = new_w, new_h
+    WindowResize(win, WINDOW_WIDTH, WINDOW_HEIGHT, C.background)
+    Redraw()
+    return true
+end
+
+function ResizeMouseMove(flags, hotspot_id)
+    if resize_active then UpdateResizeFromMouse() end
+    SetCursor(miniwin.cursor_nw_se_arrow)
+    return 0
+end
+
+function ResizeMouseUp(flags, hotspot_id)
+    if resize_active then UpdateResizeFromMouse() end
+    resize_active = false
+    SaveWindowSize()
+    WindowMoveHotspot(win,"drag_bar",0,0,WINDOW_WIDTH,30)
+    DrawWindow()
+    return 0
+end
+
+local function InstallResizeHandle()
+    WindowDeleteHotspot(win, "00_resize")
+    WindowAddHotspot(win, "00_resize", WINDOW_WIDTH-RESIZE_GRIP_SIZE, WINDOW_HEIGHT-RESIZE_GRIP_SIZE, WINDOW_WIDTH, WINDOW_HEIGHT,
+        "", "", "ResizeMouseDown", "", "", "Drag to resize", miniwin.cursor_nw_se_arrow, 0)
+    WindowDragHandler(win, "00_resize", "ResizeMouseMove", "ResizeMouseUp", 0)
+    WindowLine(win, WINDOW_WIDTH-11, WINDOW_HEIGHT-3, WINDOW_WIDTH-3, WINDOW_HEIGHT-11, C.border, miniwin.pen_solid, 1)
+    WindowLine(win, WINDOW_WIDTH-7, WINDOW_HEIGHT-3, WINDOW_WIDTH-3, WINDOW_HEIGHT-7, C.border, miniwin.pen_solid, 1)
+end
+
+function SaveWindowPosition()
+
+    SaveWindowSize()
+
+    SetVariable(
+        "window_x",
+        tostring(window_x)
+    )
+
+    SetVariable(
+        "window_y",
+        tostring(window_y)
+    )
+
+end
+
+
+------------------------------------------------------------
+-- INSTALL
+------------------------------------------------------------
+
+function OnPluginInstall()
+
+    LoadTheme()
+
+    --------------------------------------------------------
+    -- Main window
+    --------------------------------------------------------
+
+    WindowCreate(
+        win,
+        window_x,
+        window_y,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        miniwin.pos_top_left,
+        miniwin.create_absolute_location,
+        C.background
+    )
+
+
+    --------------------------------------------------------
+    -- Fonts
+    --------------------------------------------------------
+
+    WindowFont(
+        win,
+        font,
+        "Arial",
+        11,
+        true,
+        false,
+        false,
+        false
+    )
+
+    WindowFont(
+        win,
+        small_font,
+        "Arial",
+        9,
+        false,
+        false,
+        false,
+        false
+    )
+
+
+    --------------------------------------------------------
+    -- Temporary miniwindow used for rotated text
+    --------------------------------------------------------
+
+    WindowCreate(
+        label_window,
+        0,
+        0,
+        1,
+        1,
+        miniwin.pos_top_left,
+        miniwin.create_absolute_location,
+        C.black
+    )
+
+    WindowFont(
+        label_window,
+        label_font,
+        "Arial",
+        11,
+        true,
+        false,
+        false,
+        false
+    )
+
+
+    --------------------------------------------------------
+    -- Drag hotspot
+    --------------------------------------------------------
+
+    WindowAddHotspot(
+        win,
+        "drag_bar",
+        0,
+        0,
+        WINDOW_WIDTH,
+        30,
+        "",
+        "",
+        "DragMouseDown",
+        "",
+        "",
+        "Drag window",
+        0,
+        0
+    )
+
+    WindowDragHandler(
+        win,
+        "drag_bar",
+        "DragMouseMove",
+        "DragMouseUp",
+        0
+    )
+
+
+    --------------------------------------------------------
+    -- Display
+    --------------------------------------------------------
+
+    WindowShow(
+        win,
+        true
+    )
+
+    DrawWindow()
+end
+
+
+------------------------------------------------------------
+-- ENABLE / DISABLE
+------------------------------------------------------------
+
+function OnPluginEnable()
+
+    LoadTheme()
+
+    WindowShow(
+        win,
+        true
+    )
+
+    DrawWindow()
+end
+
+
+function OnPluginDisable()
+
+    SaveWindowPosition()
+
+    WindowShow(
+        win,
+        false
+    )
+
+    Redraw()
+end
+
+
+function OnPluginClose()
+
+    SaveWindowPosition()
+
+    WindowShow(
+        win,
+        false
+    )
+
+    WindowDelete(
+        label_window
+    )
+
+    Redraw()
+end
+
+
+------------------------------------------------------------
+-- DRAGGING
+------------------------------------------------------------
+
+function DragMouseDown(flags, hotspot_id)
+
+    if hotspot_id ~= "drag_bar" then
+        return
+    end
+
+    drag_start_x = WindowInfo(win,14)
+    drag_start_y = WindowInfo(win,15)
+end
+
+
+function DragMouseMove(flags, hotspot_id)
+
+    local pos_x = WindowInfo(win,17)
+    local pos_y = WindowInfo(win,18)
+
+    window_x = pos_x - drag_start_x
+    window_y = pos_y - drag_start_y
+
+    WindowPosition(
+        win,
+        window_x,
+        window_y,
+        0,
+        miniwin.create_absolute_location
+    )
+end
+
+
+function DragMouseUp(flags, hotspot_id)
+
+    SaveWindowPosition()
+
+end
+
+
+------------------------------------------------------------
+-- EXIT TRIGGER
+------------------------------------------------------------
+
+function OnExits(name, line, wildcards)
+
+    exits = {}
+
+    currentRoomName =
+        wildcards[1] or
+        "EXIT COMPASS"
+
+    local exit_string = wildcards[2] or ""
+
+    for exit in string.gmatch(
+        exit_string,
+        "[^,]+"
+    ) do
+
+        exit = exit:match(
+            "^%s*(.-)%s*$"
+        )
+
+        if exit ~= "" then
+            table.insert(
+                exits,
+                exit
+            )
+        end
+
+    end
+
+    DrawWindow()
+end
+
+
+------------------------------------------------------------
+-- BASIC DRAWING
+------------------------------------------------------------
+
+function DrawCircle(x,y,radius,outline,fill,width)
+
+    WindowCircleOp(
+        win,
+        miniwin.circle_ellipse,
+        x-radius,
+        y-radius,
+        x+radius,
+        y+radius,
+        outline,
+        miniwin.pen_solid,
+        width or 1,
+        fill,
+        miniwin.brush_solid,
+        0,
+        0,
+        0,
+        0
+    )
+end
+
+
+function DrawLine(x1,y1,x2,y2,colour,width)
+
+    WindowLine(
+        win,
+        x1,
+        y1,
+        x2,
+        y2,
+        colour,
+        miniwin.pen_solid,
+        width or 1
+    )
+end
+
+
+------------------------------------------------------------
+-- RESPONSIVE COMPASS GEOMETRY
+------------------------------------------------------------
+
+function CurrentCompassRadius()
+    local dividerX = math.max(150, math.floor(WINDOW_WIDTH * 0.51))
+    local bodyH = WINDOW_HEIGHT - 30
+    return math.max(42, math.min(86, math.floor(math.min(dividerX - 26, bodyH - 26) / 2)))
+end
+
+------------------------------------------------------------
+-- DIRECTION ARROWS
+------------------------------------------------------------
+
+function DrawDirectionArrow(cx,cy,angle,active)
+
+    local compass_radius = CurrentCompassRadius()
+    local inner_radius = math.max(9, math.floor(compass_radius * 0.19))
+    local outer_radius = math.max(inner_radius + 18, math.floor(compass_radius * 0.73))
+
+    local x1 =
+        cx +
+        math.cos(angle) *
+        inner_radius
+
+    local y1 =
+        cy +
+        math.sin(angle) *
+        inner_radius
+
+    local x2 =
+        cx +
+        math.cos(angle) *
+        outer_radius
+
+    local y2 =
+        cy +
+        math.sin(angle) *
+        outer_radius
+
+
+    if active then
+
+        DrawLine(
+            x1,
+            y1,
+            x2,
+            y2,
+            C.active_dark,
+            7
+        )
+
+        DrawLine(
+            x1,
+            y1,
+            x2,
+            y2,
+            C.active,
+            3
+        )
+
+
+        local head_length = math.max(8, math.floor(compass_radius * 0.19))
+        local head_width  = math.max(5, math.floor(compass_radius * 0.10))
+
+        local hx =
+            x2 -
+            math.cos(angle) *
+            head_length
+
+        local hy =
+            y2 -
+            math.sin(angle) *
+            head_length
+
+        local px =
+            -math.sin(angle)
+
+        local py =
+            math.cos(angle)
+
+        local left_x =
+            hx +
+            px *
+            head_width
+
+        local left_y =
+            hy +
+            py *
+            head_width
+
+        local right_x =
+            hx -
+            px *
+            head_width
+
+        local right_y =
+            hy -
+            py *
+            head_width
+
+
+        WindowPolygon(
+            win,
+
+            string.format(
+                "%d,%d,%d,%d,%d,%d",
+
+                math.floor(x2),
+                math.floor(y2),
+
+                math.floor(left_x),
+                math.floor(left_y),
+
+                math.floor(right_x),
+                math.floor(right_y)
+            ),
+
+            C.active_dark,
+            miniwin.pen_solid,
+            1,
+
+            C.active,
+            miniwin.brush_solid,
+
+            true,
+            false
+        )
+
+    else
+
+        DrawLine(
+            x1,
+            y1,
+            x2,
+            y2,
+            C.dim,
+            1
+        )
+
+    end
+end
+
+
+------------------------------------------------------------
+-- COMPASS TICKS
+------------------------------------------------------------
+
+function DrawCompassTicks(cx,cy)
+
+    local compass_radius = CurrentCompassRadius()
+    local outer       = math.max(30, compass_radius - 5)
+    local inner_minor = math.max(26, outer - math.max(4, math.floor(compass_radius * 0.07)))
+    local inner_major = math.max(23, outer - math.max(8, math.floor(compass_radius * 0.14)))
+
+    for i=0,71 do
+
+        local angle =
+            i *
+            (
+                math.pi *
+                2 /
+                72
+            )
+
+        local length
+
+        if i % 9 == 0 then
+
+            length =
+                inner_major
+
+        elseif i % 3 == 0 then
+
+            length =
+                inner_minor +
+                2
+
+        else
+
+            length =
+                inner_minor
+
+        end
+
+
+        local x1 =
+            cx +
+            math.cos(angle) *
+            outer
+
+        local y1 =
+            cy +
+            math.sin(angle) *
+            outer
+
+        local x2 =
+            cx +
+            math.cos(angle) *
+            length
+
+        local y2 =
+            cy +
+            math.sin(angle) *
+            length
+
+
+        local width = 1
+
+        if i % 9 == 0 then
+            width = 2
+        end
+
+
+        DrawLine(
+            x1,
+            y1,
+            x2,
+            y2,
+            C.tick,
+            width
+        )
+
+    end
+end
+
+
+------------------------------------------------------------
+-- ROTATED LABEL
+------------------------------------------------------------
+
+function DrawRotatedLabel(
+    text,
+    destination_x,
+    destination_y,
+    rotation,
+    colour
+)
+
+    local text_width =
+        WindowTextWidth(
+            label_window,
+            label_font,
+            text,
+            false
+        )
+
+    local text_height =
+        WindowFontInfo(
+            label_window,
+            label_font,
+            1
+        )
+
+
+    local padding_x = 3
+    local padding_y = 2
+
+    local image_width =
+        text_width +
+        padding_x * 2
+
+    local image_height =
+        text_height +
+        padding_y * 2
+
+
+    WindowDelete(
+        label_window
+    )
+
+    WindowCreate(
+        label_window,
+        0,
+        0,
+        image_width,
+        image_height,
+        miniwin.pos_top_left,
+        miniwin.create_absolute_location,
+        C.black
+    )
+
+
+    WindowFont(
+        label_window,
+        label_font,
+        "Arial",
+        11,
+        true,
+        false,
+        false,
+        false
+    )
+
+
+    WindowText(
+        label_window,
+        label_font,
+        text,
+
+        padding_x,
+        padding_y,
+
+        image_width,
+        image_height,
+
+        colour,
+        false
+    )
+
+
+    WindowImageFromWindow(
+        win,
+        label_image,
+        label_window
+    )
+
+
+    local radians =
+        math.rad(
+            rotation
+        )
+
+    local cosine =
+        math.cos(
+            radians
+        )
+
+    local sine =
+        math.sin(
+            radians
+        )
+
+
+    local mxx = cosine
+    local mxy = -sine
+
+    local myx = sine
+    local myy = cosine
+
+
+    local source_cx =
+        image_width /
+        2
+
+    local source_cy =
+        image_height /
+        2
+
+
+    local left =
+        destination_x -
+        (
+            source_cx *
+            mxx +
+            source_cy *
+            mxy
+        )
+
+    local top =
+        destination_y -
+        (
+            source_cx *
+            myx +
+            source_cy *
+            myy
+        )
+
+
+    WindowTransformImage(
+        win,
+        label_image,
+
+        math.floor(
+            left +
+            0.5
+        ),
+
+        math.floor(
+            top +
+            0.5
+        ),
+
+        miniwin.image_transparent_copy,
+
+        mxx,
+        mxy,
+        myx,
+        myy
+    )
+end
+
+
+------------------------------------------------------------
+-- CARDINAL LABEL
+------------------------------------------------------------
+
+function DrawCardinalLabel(
+    text,
+    centre_x,
+    centre_y,
+    colour
+)
+
+    local text_width =
+        WindowTextWidth(
+            win,
+            font,
+            text,
+            false
+        )
+
+    local text_height =
+        WindowFontInfo(
+            win,
+            font,
+            1
+        )
+
+    local left =
+        centre_x -
+        text_width /
+        2
+
+    local top =
+        centre_y -
+        text_height /
+        2
+
+    WindowText(
+        win,
+        font,
+        text,
+
+        math.floor(
+            left +
+            0.5
+        ),
+
+        math.floor(
+            top +
+            0.5
+        ),
+
+        0,
+        0,
+
+        colour,
+        false
+    )
+end
+
+
+------------------------------------------------------------
+-- DIRECTION LABELS
+------------------------------------------------------------
+
+function DrawDirectionLabels(cx,cy,active)
+
+    local compassRadius = CurrentCompassRadius()
+    local cardinal_radius = compassRadius + 12
+    local diagonal_radius = compassRadius + 11
+
+
+    for _,direction in ipairs(directions) do
+
+        local colour = C.inactive
+
+        if active[direction.key] then
+            colour = C.active
+        end
+
+
+        if direction.key == "n" then
+
+            DrawCardinalLabel(
+                "N",
+                cx,
+                cy -
+                cardinal_radius,
+                colour
+            )
+
+
+        elseif direction.key == "e" then
+
+            DrawCardinalLabel(
+                "E",
+                cx +
+                cardinal_radius,
+                cy,
+                colour
+            )
+
+
+        elseif direction.key == "s" then
+
+            DrawCardinalLabel(
+                "S",
+                cx,
+                cy +
+                cardinal_radius,
+                colour
+            )
+
+
+        elseif direction.key == "w" then
+
+            DrawCardinalLabel(
+                "W",
+                cx -
+                cardinal_radius,
+                cy,
+                colour
+            )
+
+
+        elseif direction.key == "ne" then
+
+            local x =
+                cx +
+                math.cos(
+                    direction.angle
+                ) *
+                diagonal_radius
+
+            local y =
+                cy +
+                math.sin(
+                    direction.angle
+                ) *
+                diagonal_radius
+
+            DrawRotatedLabel(
+                "NE",
+                x,
+                y,
+                45,
+                colour
+            )
+
+
+        elseif direction.key == "se" then
+
+            local x =
+                cx +
+                math.cos(
+                    direction.angle
+                ) *
+                diagonal_radius
+
+            local y =
+                cy +
+                math.sin(
+                    direction.angle
+                ) *
+                diagonal_radius
+
+            DrawRotatedLabel(
+                "SE",
+                x,
+                y,
+                -45,
+                colour
+            )
+
+
+        elseif direction.key == "sw" then
+
+            local x =
+                cx +
+                math.cos(
+                    direction.angle
+                ) *
+                diagonal_radius
+
+            local y =
+                cy +
+                math.sin(
+                    direction.angle
+                ) *
+                diagonal_radius
+
+            DrawRotatedLabel(
+                "SW",
+                x,
+                y,
+                45,
+                colour
+            )
+
+
+        elseif direction.key == "nw" then
+
+            local x =
+                cx +
+                math.cos(
+                    direction.angle
+                ) *
+                diagonal_radius
+
+            local y =
+                cy +
+                math.sin(
+                    direction.angle
+                ) *
+                diagonal_radius
+
+            DrawRotatedLabel(
+                "NW",
+                x,
+                y,
+                -45,
+                colour
+            )
+
+        end
+
+    end
+end
+
+
+------------------------------------------------------------
+-- DRAW COMPASS
+------------------------------------------------------------
+
+function DrawCompass()
+
+    local dividerX = math.max(150, math.floor(WINDOW_WIDTH * 0.51))
+    local bodyH = WINDOW_HEIGHT - 30
+    local cx = math.floor(dividerX / 2)
+    local cy = 30 + math.floor(bodyH / 2)
+
+    local outer_radius = CurrentCompassRadius()
+    local face_radius  = outer_radius - 4
+
+    local active = {}
+
+
+    for _,exit in ipairs(exits) do
+
+        local direction =
+            FindDirection(
+                exit
+            )
+
+        if direction then
+
+            active[
+                direction.key
+            ] = true
+
+        end
+
+    end
+
+
+    DrawCircle(
+        cx,
+        cy,
+        outer_radius + 2,
+        C.outline,
+        C.outline,
+        2
+    )
+
+
+    DrawCircle(
+        cx,
+        cy,
+        outer_radius,
+        C.dark,
+        C.face,
+        1
+    )
+
+
+    DrawCircle(
+        cx,
+        cy,
+        face_radius,
+        C.outline,
+        C.face,
+        1
+    )
+
+
+    DrawCompassTicks(
+        cx,
+        cy
+    )
+
+
+    for _,direction in ipairs(directions) do
+
+        DrawDirectionArrow(
+            cx,
+            cy,
+            direction.angle,
+            active[
+                direction.key
+            ] == true
+        )
+
+    end
+
+
+    DrawDirectionLabels(
+        cx,
+        cy,
+        active
+    )
+
+
+    DrawCircle(
+        cx,
+        cy,
+        11,
+        C.outline,
+        C.face,
+        2
+    )
+
+    DrawCircle(
+        cx,
+        cy,
+        4,
+        C.active_dark,
+        C.active,
+        1
+    )
+
+    --------------------------------------------------------
+    -- Clickable active compass directions.
+    --------------------------------------------------------
+
+    local hotspot_radius = math.max(34, outer_radius - 13)
+    local hotspot_half = math.max(11, math.floor(outer_radius * 0.21))
+
+    for _, direction in ipairs(directions) do
+        if active[direction.key] then
+            local hx =
+                cx +
+                math.cos(direction.angle) *
+                hotspot_radius
+
+            local hy =
+                cy +
+                math.sin(direction.angle) *
+                hotspot_radius
+
+            AddExitHotspot(
+                "compass_exit_" .. direction.key,
+                math.floor(hx - hotspot_half),
+                math.floor(hy - hotspot_half),
+                math.floor(hx + hotspot_half),
+                math.floor(hy + hotspot_half),
+                direction.key,
+                "Go " .. direction.label
+            )
+        end
+    end
+end
+
+
+------------------------------------------------------------
+-- OTHER EXITS
+------------------------------------------------------------
+
+function DrawOtherExits()
+
+    local other_exits = {}
+
+
+    for _,exit in ipairs(exits) do
+
+        if not FindDirection(exit) then
+
+            table.insert(
+                other_exits,
+                exit
+            )
+
+        end
+
+    end
+
+
+    WindowText(
+        win,
+        font,
+        "OTHER EXITS",
+
+        math.max(160, math.floor(WINDOW_WIDTH * 0.51)) + 13,
+        43,
+
+        WINDOW_WIDTH - 15,
+        59,
+
+        C.title,
+        false
+    )
+
+
+    WindowLine(
+        win,
+
+        math.max(160, math.floor(WINDOW_WIDTH * 0.51)) + 13,
+        62,
+
+        WINDOW_WIDTH - 15,
+        62,
+
+        C.dim,
+        miniwin.pen_solid,
+        1
+    )
+
+
+    if #other_exits == 0 then
+
+        WindowText(
+            win,
+            small_font,
+            "None",
+
+            math.max(160, math.floor(WINDOW_WIDTH * 0.51)) + 18,
+            71,
+
+            WINDOW_WIDTH - 15,
+            88,
+
+            C.dim,
+            false
+        )
+
+        return
+    end
+
+
+    local y = 70
+
+
+    for index,exit in ipairs(other_exits) do
+
+        DrawCircle(
+            math.max(160, math.floor(WINDOW_WIDTH * 0.51)) + 19,
+            y + 6,
+            3,
+            C.active_dark,
+            C.active,
+            1
+        )
+
+
+        WindowText(
+            win,
+            small_font,
+            exit,
+
+            math.max(160, math.floor(WINDOW_WIDTH * 0.51)) + 29,
+            y,
+
+            WINDOW_WIDTH - 15,
+            y + 17,
+
+            C.other,
+            false
+        )
+
+        ----------------------------------------------------
+        -- Entire other-exit row is clickable.
+        ----------------------------------------------------
+
+        AddExitHotspot(
+            "other_exit_" .. tostring(index),
+            math.max(160, math.floor(WINDOW_WIDTH * 0.51)) + 9,
+            y - 2,
+            WINDOW_WIDTH - 10,
+            y + 17,
+            exit,
+            "Go: " .. exit
+        )
+
+        y =
+            y +
+            19
+
+
+        if y >
+            WINDOW_HEIGHT -
+            20
+        then
+            break
+        end
+
+    end
+end
+
+
+------------------------------------------------------------
+-- DRAW MAIN WINDOW
+------------------------------------------------------------
+
+function DrawWindow()
+
+    --------------------------------------------------------
+    -- Rebuild dynamic exit hotspots every redraw so room
+    -- changes cannot leave stale clickable exits behind.
+    --------------------------------------------------------
+
+    ClearExitHotspots()
+
+    WindowRectOp(
+        win,
+        miniwin.rect_fill,
+        0,
+        0,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        C.background
+    )
+
+
+    WindowRectOp(
+        win,
+        miniwin.rect_fill,
+        0,
+        0,
+        WINDOW_WIDTH,
+        30,
+        C.panel
+    )
+
+
+    WindowLine(
+        win,
+
+        0,
+        29,
+
+        WINDOW_WIDTH,
+        29,
+
+        C.border,
+        miniwin.pen_solid,
+        1
+    )
+
+
+    local title_width =
+        WindowTextWidth(
+            win,
+            font,
+            currentRoomName,
+            false
+        )
+
+    local title_x =
+        math.floor(
+            (
+                WINDOW_WIDTH -
+                title_width
+            ) /
+            2
+        )
+
+    WindowText(
+        win,
+        font,
+        currentRoomName,
+
+        title_x,
+        6,
+
+        WINDOW_WIDTH - 10,
+        24,
+
+        C.title,
+        false
+    )
+
+
+    WindowLine(
+        win,
+
+        math.floor(WINDOW_WIDTH * 0.51),
+        36,
+
+        math.floor(WINDOW_WIDTH * 0.51),
+        WINDOW_HEIGHT - 10,
+
+        C.dim,
+        miniwin.pen_solid,
+        1
+    )
+
+
+    DrawCompass()
+
+    DrawOtherExits()
+
+
+    WindowRectOp(
+        win,
+        miniwin.rect_frame,
+        0,
+        0,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        C.border
+    )
+
+
+    WindowShow(
+        win,
+        true
+    )
+
+    InstallResizeHandle()
+    Redraw()
+end
+
+
+------------------------------------------------------------
+-- THEME BROADCAST
+------------------------------------------------------------
+
+function OnPluginBroadcast(
+    msg,
+    id,
+    name,
+    text
+)
+
+    if msg ~= THEME_BROADCAST_MESSAGE then
+        return
+    end
+
+    if id ~= THEME_CONTROLLER_ID then
+        return
+    end
+
+    LoadTheme()
+
+    --------------------------------------------------------
+    -- Recreate the rotated-label scratch window with the
+    -- new terminal background colour.
+    --------------------------------------------------------
+
+    WindowDelete(
+        label_window
+    )
+
+    WindowCreate(
+        label_window,
+        0,
+        0,
+        1,
+        1,
+        miniwin.pos_top_left,
+        miniwin.create_absolute_location,
+        C.background
+    )
+
+    WindowFont(
+        label_window,
+        label_font,
+        "Arial",
+        11,
+        true,
+        false,
+        false,
+        false
+    )
+
+    DrawWindow()
+end
+
+
+
+
+--------------------------------------------------
+-- PLUGIN CONTROLLER LAYOUT API
+--------------------------------------------------
+
+function ManagedLayoutParse(spec)
+    local windowName, sx, sy, sw, sh =
+        tostring(spec or ""):match("^([^\t]+)\t(-?%d+)\t(-?%d+)\t(%d+)\t(%d+)$")
+    if not windowName then return nil end
+    return windowName, tonumber(sx), tonumber(sy), tonumber(sw), tonumber(sh)
+end
+
+function GetManagedLayoutWindows()
+    -- Deliberately excludes ExitWindowLabel, which is only an off-screen scratch
+    -- surface used to rotate text.
+    return win
+end
+
+function ApplyManagedLayout(spec)
+    local windowName, x, y, w, h = ManagedLayoutParse(spec)
+    if windowName ~= win then return "wrong window" end
+
+    window_x = math.floor(x)
+    window_y = math.floor(y)
+    WINDOW_WIDTH = math.max(MIN_WINDOW_WIDTH, math.floor(w))
+    WINDOW_HEIGHT = math.max(MIN_WINDOW_HEIGHT, math.floor(h))
+
+    WindowResize(
+        win,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        C.background
+    )
+
+    SaveWindowPosition()
+    DrawWindow()
+    WindowPosition(win, window_x, window_y, miniwin.pos_top_left, miniwin.create_absolute_location)
+    pcall(SaveState)
+    Redraw()
+    return "ok"
+end
+
+]]>
+</script>
+
+</muclient>

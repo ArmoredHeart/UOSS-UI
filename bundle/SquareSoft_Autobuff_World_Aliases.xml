@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+
+<muclient>
+<aliases>
+  <alias
+      name="agon"
+      group="Autobuff Controls"
+      match="^agon$"
+      regexp="y"
+      ignore_case="y"
+      enabled="y"
+      send_to="12"
+      sequence="100"
+  >
+    <send><![CDATA[
+local rc = EnableTrigger("ag", true)
+if rc == 0 then
+    Note("Auto-Aegis [ENABLED]")
+else
+    Note("Auto-Aegis [FAILED: trigger 'ag' not found]")
+end
+]]></send>
+  </alias>
+
+  <alias
+      name="agoff"
+      group="Autobuff Controls"
+      match="^agoff$"
+      regexp="y"
+      ignore_case="y"
+      enabled="y"
+      send_to="12"
+      sequence="100"
+  >
+    <send><![CDATA[
+local rc = EnableTrigger("ag", false)
+if rc == 0 then
+    Note("Auto-Aegis [DISABLED]")
+else
+    Note("Auto-Aegis [FAILED: trigger 'ag' not found]")
+end
+]]></send>
+  </alias>
+
+  <alias
+      name="bon"
+      group="Autobuff Controls"
+      match="^bon$"
+      regexp="y"
+      ignore_case="y"
+      enabled="y"
+      send_to="12"
+      sequence="100"
+  >
+    <send><![CDATA[
+local rc = EnableTrigger("b", true)
+if rc == 0 then
+    Note("Auto-BuildUp [ENABLED]")
+else
+    Note("Auto-BuildUp [FAILED: trigger 'b' not found]")
+end
+]]></send>
+  </alias>
+
+  <alias
+      name="boff"
+      group="Autobuff Controls"
+      match="^boff$"
+      regexp="y"
+      ignore_case="y"
+      enabled="y"
+      send_to="12"
+      sequence="100"
+  >
+    <send><![CDATA[
+local rc = EnableTrigger("b", false)
+if rc == 0 then
+    Note("Auto-BuildUp [DISABLED]")
+else
+    Note("Auto-BuildUp [FAILED: trigger 'b' not found]")
+end
+]]></send>
+  </alias>
+
+  <alias
+      name="endon"
+      group="Autobuff Controls"
+      match="^endon$"
+      regexp="y"
+      ignore_case="y"
+      enabled="y"
+      send_to="12"
+      sequence="100"
+  >
+    <send><![CDATA[
+local rc = EnableTrigger("end", true)
+if rc == 0 then
+    Note("Auto-Endurance [ENABLED]")
+else
+    Note("Auto-Endurance [FAILED: trigger 'end' not found]")
+end
+]]></send>
+  </alias>
+
+  <alias
+      name="endoff"
+      group="Autobuff Controls"
+      match="^endoff$"
+      regexp="y"
+      ignore_case="y"
+      enabled="y"
+      send_to="12"
+      sequence="100"
+  >
+    <send><![CDATA[
+local rc = EnableTrigger("end", false)
+if rc == 0 then
+    Note("Auto-Endurance [DISABLED]")
+else
+    Note("Auto-Endurance [FAILED: trigger 'end' not found]")
+end
+]]></send>
+  </alias>
+</aliases>
+</muclient>

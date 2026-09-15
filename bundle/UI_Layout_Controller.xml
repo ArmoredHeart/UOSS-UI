@@ -1,0 +1,1340 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+
+<muclient>
+
+<plugin
+   name="UI_Layout_Controller"
+   author="ChatGPT"
+   id="7b4e91c2a6d34f0ca8e12573"
+   language="Lua"
+   purpose="Centers MUSHclient output and shows theme-based stretched gutter backgrounds."
+   save_state="y"
+   date_written="2026-09-07"
+   version="1.27"
+   >
+
+<description trim="y">
+<![CDATA[
+UI Layout Controller v1.27
+
+Centers normal MUD output and reserves left/right gutters for
+miniwindow plugins.
+
+This version supports theme-linked gutter backgrounds:
+
+  default = neon green hex HUD
+  classic = grey stone panels (the former default)
+  amber   = amber/orange shard HUD
+  red     = automatic critical-HP alert; five random variants per side
+  warning = automatic HP warning; five random variants per side
+
+Legacy "green" from an older Theme Controller is treated as "default".
+
+Put these files in the "gutters" subfolder beside this plugin XML:
+
+  UILayout_Gutter_Left_Grey.png
+  UILayout_Gutter_Right_Grey.png
+  UILayout_Gutter_Left_Green.png
+  UILayout_Gutter_Right_Green.png
+  UILayout_Gutter_Left_Amber.png
+  UILayout_Gutter_Right_Amber.png
+
+  UILayout_Gutter_Left_Red_1.png ... Red_5.png
+  UILayout_Gutter_Right_Red_1.png ... Red_5.png
+  UILayout_Gutter_Left_Warning_1.png ... Warning_5.png
+  UILayout_Gutter_Right_Warning_1.png ... Warning_5.png
+
+Commands:
+
+  layout
+      Show current layout/background status.
+
+  layout 390 850
+      Set left/right gutter widths.
+
+  layout 300
+      Set both gutters to 300 px.
+
+  layout on
+  layout off
+
+  layout bg on
+  layout bg off
+  layout bg reload
+      Reload the current theme's gutter PNGs from disk.
+
+Default new-install gutters are 390 px left / 850 px right.
+
+The miniwindow backgrounds are assigned a very low Z-order so
+normal tracker/plugin miniwindows should render above them.
+]]>
+</description>
+
+</plugin>
+
+<aliases>
+
+<alias
+   name="Layout_Status"
+   script="LayoutStatus"
+   match="^layout$"
+   regexp="y"
+   ignore_case="y"
+   enabled="y"
+   sequence="100"
+/>
+
+<alias
+   name="Layout_Off"
+   script="LayoutOff"
+   match="^layout\s+(?:off|reset)$"
+   regexp="y"
+   ignore_case="y"
+   enabled="y"
+   sequence="100"
+/>
+
+<alias
+   name="Layout_On"
+   script="LayoutOn"
+   match="^layout\s+on$"
+   regexp="y"
+   ignore_case="y"
+   enabled="y"
+   sequence="100"
+/>
+
+<alias
+   name="Layout_Symmetric"
+   script="LayoutSymmetric"
+   match="^layout\s+(\d+)$"
+   regexp="y"
+   ignore_case="y"
+   enabled="y"
+   sequence="100"
+/>
+
+<alias
+   name="Layout_Asymmetric"
+   script="LayoutAsymmetric"
+   match="^layout\s+(\d+)\s+(\d+)$"
+   regexp="y"
+   ignore_case="y"
+   enabled="y"
+   sequence="100"
+/>
+
+<alias
+   name="Layout_BG_On"
+   script="LayoutBackgroundOn"
+   match="^layout\s+bg\s+on$"
+   regexp="y"
+   ignore_case="y"
+   enabled="y"
+   sequence="100"
+/>
+
+<alias
+   name="Layout_BG_Off"
+   script="LayoutBackgroundOff"
+   match="^layout\s+bg\s+off$"
+   regexp="y"
+   ignore_case="y"
+   enabled="y"
+   sequence="100"
+/>
+
+<alias
+   name="Layout_BG_Reload"
+   script="LayoutBackgroundReload"
+   match="^layout\s+bg\s+reload$"
+   regexp="y"
+   ignore_case="y"
+   enabled="y"
+   sequence="100"
+/>
+
+</aliases>
+
+
+<timers>
+
+<timer
+   name="UILayout_HealthAlertRandomizer"
+   second="2"
+   enabled="y"
+   script="HealthAlertAnimationTick"
+/>
+
+</timers>
+
+
+<script>
+<![CDATA[
+
+--------------------------------------------------
+-- UI LAYOUT CONTROLLER v1.26
+--------------------------------------------------
+
+local THEME_CONTROLLER_ID =
+    "43c8d047be7a418ba5e86916"
+
+local THEME_BROADCAST_MESSAGE =
+    9042
+
+local DEFAULT_LEFT_GUTTER =
+    390
+
+local DEFAULT_RIGHT_GUTTER =
+    850
+
+local MIN_TEXT_PIXELS =
+    560
+
+local MIN_TEXT_COLUMNS =
+    72
+
+--------------------------------------------------
+-- GUTTER BACKGROUNDS
+--------------------------------------------------
+
+local GUTTER_IMAGE_DIRECTORY =
+    "gutters"
+
+local LEFT_BG_WIN =
+    "A_UI_LAYOUT_BACKGROUND_LEFT_" ..
+    GetPluginID()
+
+local RIGHT_BG_WIN =
+    "A_UI_LAYOUT_BACKGROUND_RIGHT_" ..
+    GetPluginID()
+
+local LEFT_BG_IMAGE_ID =
+    "gutter_left"
+
+local RIGHT_BG_IMAGE_ID =
+    "gutter_right"
+
+local DEFAULT_LEFT_BG_FILENAME =
+    "UILayout_Gutter_Left_Green.png"
+
+local DEFAULT_RIGHT_BG_FILENAME =
+    "UILayout_Gutter_Right_Green.png"
+
+local CLASSIC_LEFT_BG_FILENAME =
+    "UILayout_Gutter_Left_Grey.png"
+
+local CLASSIC_RIGHT_BG_FILENAME =
+    "UILayout_Gutter_Right_Grey.png"
+
+local AMBER_LEFT_BG_FILENAME =
+    "UILayout_Gutter_Left_Amber.png"
+
+local AMBER_RIGHT_BG_FILENAME =
+    "UILayout_Gutter_Right_Amber.png"
+
+local RED_LEFT_BG_FILENAMES = {
+    "UILayout_Gutter_Left_Red_1.png",
+    "UILayout_Gutter_Left_Red_2.png",
+    "UILayout_Gutter_Left_Red_3.png",
+    "UILayout_Gutter_Left_Red_4.png",
+    "UILayout_Gutter_Left_Red_5.png"
+}
+
+local RED_RIGHT_BG_FILENAMES = {
+    "UILayout_Gutter_Right_Red_1.png",
+    "UILayout_Gutter_Right_Red_2.png",
+    "UILayout_Gutter_Right_Red_3.png",
+    "UILayout_Gutter_Right_Red_4.png",
+    "UILayout_Gutter_Right_Red_5.png"
+}
+
+local RED_LEFT_IMAGE_IDS = {
+    "red_left_1",
+    "red_left_2",
+    "red_left_3",
+    "red_left_4",
+    "red_left_5"
+}
+
+local RED_RIGHT_IMAGE_IDS = {
+    "red_right_1",
+    "red_right_2",
+    "red_right_3",
+    "red_right_4",
+    "red_right_5"
+}
+
+local WARNING_LEFT_BG_FILENAMES = {
+    "UILayout_Gutter_Left_Warning_1.png",
+    "UILayout_Gutter_Left_Warning_2.png",
+    "UILayout_Gutter_Left_Warning_3.png",
+    "UILayout_Gutter_Left_Warning_4.png",
+    "UILayout_Gutter_Left_Warning_5.png"
+}
+
+local WARNING_RIGHT_BG_FILENAMES = {
+    "UILayout_Gutter_Right_Warning_1.png",
+    "UILayout_Gutter_Right_Warning_2.png",
+    "UILayout_Gutter_Right_Warning_3.png",
+    "UILayout_Gutter_Right_Warning_4.png",
+    "UILayout_Gutter_Right_Warning_5.png"
+}
+
+local WARNING_LEFT_IMAGE_IDS = {
+    "warning_left_1",
+    "warning_left_2",
+    "warning_left_3",
+    "warning_left_4",
+    "warning_left_5"
+}
+
+local WARNING_RIGHT_IMAGE_IDS = {
+    "warning_right_1",
+    "warning_right_2",
+    "warning_right_3",
+    "warning_right_4",
+    "warning_right_5"
+}
+
+local BACKGROUND_Z_ORDER =
+    -10000
+
+local layoutEnabled =
+    true
+
+local backgroundEnabled =
+    true
+
+local configuredLeft =
+    DEFAULT_LEFT_GUTTER
+
+local configuredRight =
+    DEFAULT_RIGHT_GUTTER
+
+local effectiveLeft =
+    0
+
+local effectiveRight =
+    0
+
+local effectiveTextWidth =
+    0
+
+local leftImageLoaded =
+    false
+
+local rightImageLoaded =
+    false
+
+local leftImagePath =
+    ""
+
+local rightImagePath =
+    ""
+
+local redLeftLoaded = {}
+local redRightLoaded = {}
+
+local warningLeftLoaded = {}
+local warningRightLoaded = {}
+
+local currentRedLeftIndex = nil
+local currentRedRightIndex = nil
+
+local currentWarningLeftIndex = nil
+local currentWarningRightIndex = nil
+
+local randomSeeded = false
+
+--------------------------------------------------
+-- SMALL HELPERS
+--------------------------------------------------
+
+local function Clamp(
+    value,
+    low,
+    high
+)
+    value = tonumber(value) or low
+
+    if value < low then
+        return low
+    end
+
+    if value > high then
+        return high
+    end
+
+    return value
+end
+
+local function CurrentTheme()
+    local theme =
+        GetPluginVariable(
+            THEME_CONTROLLER_ID,
+            "effective_theme"
+        )
+
+    if not theme or
+       theme == ""
+    then
+        theme =
+            GetPluginVariable(
+                THEME_CONTROLLER_ID,
+                "theme"
+            )
+    end
+
+    theme = tostring(theme or ""):lower()
+
+    -- Backward compatibility with the old public theme name.
+    if theme == "green" then
+        theme = "default"
+    end
+
+    if theme ~= "default" and
+       theme ~= "classic" and
+       theme ~= "amber" and
+       theme ~= "red" and
+       theme ~= "warning"
+    then
+        theme = "default"
+    end
+
+    return theme
+end
+
+local function LayoutColours()
+    local theme = CurrentTheme()
+
+    if theme == "amber" then
+        return
+            ColourNameToRGB("#120B02"),
+            ColourNameToRGB("#5A3510")
+    elseif theme == "default" then
+        return
+            ColourNameToRGB("#031006"),
+            ColourNameToRGB("#174B23")
+    elseif theme == "red" then
+        return
+            ColourNameToRGB("#080000"),
+            ColourNameToRGB("#7A1010")
+    elseif theme == "warning" then
+        return
+            ColourNameToRGB("#080700"),
+            ColourNameToRGB("#806A00")
+    end
+
+    -- "classic" is the former default grey/stone appearance.
+    return
+        ColourNameToRGB("#101214"),
+        ColourNameToRGB("#30343A")
+end
+
+local function MinimumTextWidth()
+    local fontWidth = tonumber(GetInfo(213)) or 0
+    local columnsWidth = fontWidth * MIN_TEXT_COLUMNS
+
+    return math.max(MIN_TEXT_PIXELS, columnsWidth)
+end
+
+local function JoinPath(directory, filename)
+    directory = directory or ""
+
+    if directory == "" then
+        return filename
+    end
+
+    local last = directory:sub(-1)
+
+    if last == "\\" or last == "/" then
+        return directory .. filename
+    end
+
+    return directory .. "\\" .. filename
+end
+
+local function PluginDirectory()
+    return GetPluginInfo(GetPluginID(), 20) or ""
+end
+
+local function DesiredBackgroundFilenames()
+    local theme = CurrentTheme()
+
+    if theme == "classic" then
+        return CLASSIC_LEFT_BG_FILENAME, CLASSIC_RIGHT_BG_FILENAME
+    elseif theme == "amber" then
+        return AMBER_LEFT_BG_FILENAME, AMBER_RIGHT_BG_FILENAME
+    end
+
+    -- "default" is now the green terminal/HUD appearance.
+    return DEFAULT_LEFT_BG_FILENAME, DEFAULT_RIGHT_BG_FILENAME
+end
+
+--------------------------------------------------
+-- SAVE / LOAD
+--------------------------------------------------
+
+local function LoadLayoutState()
+    local enabled = GetVariable("layout_enabled")
+
+    if enabled == "0" then
+        layoutEnabled = false
+    elseif enabled == "1" then
+        layoutEnabled = true
+    end
+
+    local bgEnabled = GetVariable("layout_background_enabled")
+
+    if bgEnabled == "0" then
+        backgroundEnabled = false
+    elseif bgEnabled == "1" then
+        backgroundEnabled = true
+    end
+
+    configuredLeft = Clamp(
+        GetVariable("layout_left") or DEFAULT_LEFT_GUTTER,
+        0,
+        2000
+    )
+
+    configuredRight = Clamp(
+        GetVariable("layout_right") or DEFAULT_RIGHT_GUTTER,
+        0,
+        2000
+    )
+end
+
+local function SaveLayoutState()
+    SetVariable(
+        "layout_enabled",
+        layoutEnabled and "1" or "0"
+    )
+
+    SetVariable(
+        "layout_background_enabled",
+        backgroundEnabled and "1" or "0"
+    )
+
+    SetVariable(
+        "layout_left",
+        tostring(configuredLeft)
+    )
+
+    SetVariable(
+        "layout_right",
+        tostring(configuredRight)
+    )
+end
+
+--------------------------------------------------
+-- BACKGROUND MINIWINDOWS
+--------------------------------------------------
+
+local function HideBackgroundWindows()
+    WindowShow(LEFT_BG_WIN, false)
+    WindowShow(RIGHT_BG_WIN, false)
+end
+
+local function EnsureBackgroundWindows()
+    local fillColour = select(1, LayoutColours())
+
+    if not WindowInfo(LEFT_BG_WIN, 3) then
+        WindowCreate(
+            LEFT_BG_WIN,
+            0,
+            0,
+            1,
+            1,
+            miniwin.pos_top_left,
+            miniwin.create_absolute_location + miniwin.create_ignore_mouse,
+            fillColour
+        )
+    end
+
+    if not WindowInfo(RIGHT_BG_WIN, 3) then
+        WindowCreate(
+            RIGHT_BG_WIN,
+            0,
+            0,
+            1,
+            1,
+            miniwin.pos_top_left,
+            miniwin.create_absolute_location + miniwin.create_ignore_mouse,
+            fillColour
+        )
+    end
+
+    WindowSetZOrder(LEFT_BG_WIN, BACKGROUND_Z_ORDER)
+    WindowSetZOrder(RIGHT_BG_WIN, BACKGROUND_Z_ORDER)
+end
+
+local function TryLoadImage(win, imageId, path)
+    return WindowLoadImage(win, imageId, path) == 0
+end
+
+local function SeedRandom()
+    if randomSeeded then
+        return
+    end
+
+    randomSeeded = true
+
+    math.randomseed(
+        os.time() +
+        math.floor(
+            os.clock() *
+            100000
+        )
+    )
+
+    math.random()
+    math.random()
+    math.random()
+end
+
+local function LoadRedBackgroundImages(announceErrors)
+    EnsureBackgroundWindows()
+
+    local directory =
+        JoinPath(
+            PluginDirectory(),
+            GUTTER_IMAGE_DIRECTORY
+        )
+
+    for i = 1, 5 do
+        local leftPath =
+            JoinPath(
+                directory,
+                RED_LEFT_BG_FILENAMES[i]
+            )
+
+        local rightPath =
+            JoinPath(
+                directory,
+                RED_RIGHT_BG_FILENAMES[i]
+            )
+
+        redLeftLoaded[i] =
+            TryLoadImage(
+                LEFT_BG_WIN,
+                RED_LEFT_IMAGE_IDS[i],
+                leftPath
+            )
+
+        redRightLoaded[i] =
+            TryLoadImage(
+                RIGHT_BG_WIN,
+                RED_RIGHT_IMAGE_IDS[i],
+                rightPath
+            )
+
+        if announceErrors and
+           not redLeftLoaded[i]
+        then
+            ColourNote(
+                "red",
+                "",
+                "UI layout: could not load RED left image: " ..
+                leftPath
+            )
+        end
+
+        if announceErrors and
+           not redRightLoaded[i]
+        then
+            ColourNote(
+                "red",
+                "",
+                "UI layout: could not load RED right image: " ..
+                rightPath
+            )
+        end
+    end
+end
+
+local function LoadWarningBackgroundImages(announceErrors)
+    EnsureBackgroundWindows()
+
+    local directory =
+        JoinPath(
+            PluginDirectory(),
+            GUTTER_IMAGE_DIRECTORY
+        )
+
+    for i = 1, 5 do
+        local leftPath =
+            JoinPath(
+                directory,
+                WARNING_LEFT_BG_FILENAMES[i]
+            )
+
+        local rightPath =
+            JoinPath(
+                directory,
+                WARNING_RIGHT_BG_FILENAMES[i]
+            )
+
+        warningLeftLoaded[i] =
+            TryLoadImage(
+                LEFT_BG_WIN,
+                WARNING_LEFT_IMAGE_IDS[i],
+                leftPath
+            )
+
+        warningRightLoaded[i] =
+            TryLoadImage(
+                RIGHT_BG_WIN,
+                WARNING_RIGHT_IMAGE_IDS[i],
+                rightPath
+            )
+
+        if announceErrors and
+           not warningLeftLoaded[i]
+        then
+            ColourNote(
+                "red",
+                "",
+                "UI layout: could not load WARNING left image: " ..
+                leftPath
+            )
+        end
+
+        if announceErrors and
+           not warningRightLoaded[i]
+        then
+            ColourNote(
+                "red",
+                "",
+                "UI layout: could not load WARNING right image: " ..
+                rightPath
+            )
+        end
+    end
+end
+
+
+local function ChooseRandomLoadedIndex(
+    loaded,
+    current
+)
+    local choices = {}
+
+    for i = 1, 5 do
+        if loaded[i] and
+           i ~= current
+        then
+            table.insert(
+                choices,
+                i
+            )
+        end
+    end
+
+    if #choices == 0 then
+        for i = 1, 5 do
+            if loaded[i] then
+                table.insert(
+                    choices,
+                    i
+                )
+            end
+        end
+    end
+
+    if #choices == 0 then
+        return nil
+    end
+
+    return
+        choices[
+            math.random(
+                1,
+                #choices
+            )
+        ]
+end
+
+local function SelectRandomRedPair()
+    SeedRandom()
+
+    currentRedLeftIndex =
+        ChooseRandomLoadedIndex(
+            redLeftLoaded,
+            currentRedLeftIndex
+        )
+
+    currentRedRightIndex =
+        ChooseRandomLoadedIndex(
+            redRightLoaded,
+            currentRedRightIndex
+        )
+end
+
+
+local function SelectRandomWarningPair()
+    SeedRandom()
+
+    currentWarningLeftIndex =
+        ChooseRandomLoadedIndex(
+            warningLeftLoaded,
+            currentWarningLeftIndex
+        )
+
+    currentWarningRightIndex =
+        ChooseRandomLoadedIndex(
+            warningRightLoaded,
+            currentWarningRightIndex
+        )
+end
+
+local function LoadBackgroundImages(announceErrors)
+    EnsureBackgroundWindows()
+
+    local directory =
+        JoinPath(
+            PluginDirectory(),
+            GUTTER_IMAGE_DIRECTORY
+        )
+    local desiredLeft, desiredRight = DesiredBackgroundFilenames()
+
+    if CurrentTheme() == "red" or
+       CurrentTheme() == "warning"
+    then
+        desiredLeft =
+            CLASSIC_LEFT_BG_FILENAME
+
+        desiredRight =
+            CLASSIC_RIGHT_BG_FILENAME
+    end
+
+    leftImagePath = JoinPath(directory, desiredLeft)
+    rightImagePath = JoinPath(directory, desiredRight)
+
+    leftImageLoaded = TryLoadImage(LEFT_BG_WIN, LEFT_BG_IMAGE_ID, leftImagePath)
+    rightImageLoaded = TryLoadImage(RIGHT_BG_WIN, RIGHT_BG_IMAGE_ID, rightImagePath)
+
+    if not leftImageLoaded and desiredLeft ~= DEFAULT_LEFT_BG_FILENAME then
+        leftImagePath = JoinPath(directory, DEFAULT_LEFT_BG_FILENAME)
+        leftImageLoaded = TryLoadImage(LEFT_BG_WIN, LEFT_BG_IMAGE_ID, leftImagePath)
+    end
+
+    if not rightImageLoaded and desiredRight ~= DEFAULT_RIGHT_BG_FILENAME then
+        rightImagePath = JoinPath(directory, DEFAULT_RIGHT_BG_FILENAME)
+        rightImageLoaded = TryLoadImage(RIGHT_BG_WIN, RIGHT_BG_IMAGE_ID, rightImagePath)
+    end
+
+    if announceErrors then
+        if not leftImageLoaded then
+            ColourNote(
+                "red",
+                "",
+                "UI layout: could not load left gutter image: " .. leftImagePath
+            )
+        end
+
+        if not rightImageLoaded then
+            ColourNote(
+                "red",
+                "",
+                "UI layout: could not load right gutter image: " .. rightImagePath
+            )
+        end
+    end
+end
+
+local function DrawImageStretched(win, imageId, width, height)
+    if width <= 0 or height <= 0 then
+        return
+    end
+
+    local imageWidth = tonumber(WindowImageInfo(win, imageId, 2)) or 0
+    local imageHeight = tonumber(WindowImageInfo(win, imageId, 3)) or 0
+
+    if imageWidth <= 0 or imageHeight <= 0 then
+        return
+    end
+
+    WindowDrawImage(
+        win,
+        imageId,
+        0,
+        0,
+        width,
+        height,
+        miniwin.image_stretch,
+        0,
+        0,
+        imageWidth,
+        imageHeight
+    )
+end
+
+local function DrawGutterBackgrounds(outputWidth, outputHeight)
+    EnsureBackgroundWindows()
+
+    if not layoutEnabled or not backgroundEnabled then
+        HideBackgroundWindows()
+        return
+    end
+
+    local fillColour = select(1, LayoutColours())
+
+    if effectiveLeft > 0 then
+        WindowResize(LEFT_BG_WIN, effectiveLeft, outputHeight, fillColour)
+        WindowPosition(
+            LEFT_BG_WIN,
+            0,
+            0,
+            miniwin.pos_top_left,
+            miniwin.create_absolute_location + miniwin.create_ignore_mouse
+        )
+        WindowRectOp(LEFT_BG_WIN, miniwin.rect_fill, 0, 0, effectiveLeft, outputHeight, fillColour)
+
+        if CurrentTheme() == "red" and
+           currentRedLeftIndex and
+           redLeftLoaded[
+               currentRedLeftIndex
+           ]
+        then
+            DrawImageStretched(
+                LEFT_BG_WIN,
+                RED_LEFT_IMAGE_IDS[
+                    currentRedLeftIndex
+                ],
+                effectiveLeft,
+                outputHeight
+            )
+
+        elseif CurrentTheme() == "warning" and
+               currentWarningLeftIndex and
+               warningLeftLoaded[
+                   currentWarningLeftIndex
+               ]
+        then
+            DrawImageStretched(
+                LEFT_BG_WIN,
+                WARNING_LEFT_IMAGE_IDS[
+                    currentWarningLeftIndex
+                ],
+                effectiveLeft,
+                outputHeight
+            )
+
+        elseif leftImageLoaded then
+            DrawImageStretched(
+                LEFT_BG_WIN,
+                LEFT_BG_IMAGE_ID,
+                effectiveLeft,
+                outputHeight
+            )
+        end
+
+        WindowSetZOrder(LEFT_BG_WIN, BACKGROUND_Z_ORDER)
+        WindowShow(LEFT_BG_WIN, true)
+    else
+        WindowShow(LEFT_BG_WIN, false)
+    end
+
+    if effectiveRight > 0 then
+        WindowResize(RIGHT_BG_WIN, effectiveRight, outputHeight, fillColour)
+        WindowPosition(
+            RIGHT_BG_WIN,
+            outputWidth - effectiveRight,
+            0,
+            miniwin.pos_top_left,
+            miniwin.create_absolute_location + miniwin.create_ignore_mouse
+        )
+        WindowRectOp(RIGHT_BG_WIN, miniwin.rect_fill, 0, 0, effectiveRight, outputHeight, fillColour)
+
+        if CurrentTheme() == "red" and
+           currentRedRightIndex and
+           redRightLoaded[
+               currentRedRightIndex
+           ]
+        then
+            DrawImageStretched(
+                RIGHT_BG_WIN,
+                RED_RIGHT_IMAGE_IDS[
+                    currentRedRightIndex
+                ],
+                effectiveRight,
+                outputHeight
+            )
+
+        elseif CurrentTheme() == "warning" and
+               currentWarningRightIndex and
+               warningRightLoaded[
+                   currentWarningRightIndex
+               ]
+        then
+            DrawImageStretched(
+                RIGHT_BG_WIN,
+                WARNING_RIGHT_IMAGE_IDS[
+                    currentWarningRightIndex
+                ],
+                effectiveRight,
+                outputHeight
+            )
+
+        elseif rightImageLoaded then
+            DrawImageStretched(
+                RIGHT_BG_WIN,
+                RIGHT_BG_IMAGE_ID,
+                effectiveRight,
+                outputHeight
+            )
+        end
+
+        WindowSetZOrder(RIGHT_BG_WIN, BACKGROUND_Z_ORDER)
+        WindowShow(RIGHT_BG_WIN, true)
+    else
+        WindowShow(RIGHT_BG_WIN, false)
+    end
+end
+
+--------------------------------------------------
+-- TEXT RECTANGLE
+--------------------------------------------------
+
+function ApplyLayout()
+    if not GetInfo(285) then
+        return
+    end
+
+    if not layoutEnabled then
+        TextRectangle(0, 0, 0, 0, 0, 0, 0, 0, 0)
+        effectiveLeft = 0
+        effectiveRight = 0
+        effectiveTextWidth = tonumber(GetInfo(281)) or 0
+        HideBackgroundWindows()
+        return
+    end
+
+    local outputHeight = tonumber(GetInfo(280)) or 0
+    local outputWidth = tonumber(GetInfo(281)) or 0
+
+    if outputWidth <= 0 or outputHeight <= 0 then
+        return
+    end
+
+    local left = configuredLeft
+    local right = configuredRight
+
+    local minimumText = math.min(
+        MinimumTextWidth(),
+        math.max(240, outputWidth)
+    )
+
+    local availableForGutters = math.max(0, outputWidth - minimumText)
+    local requestedGutters = left + right
+
+    if requestedGutters > availableForGutters and requestedGutters > 0 then
+        local scale = availableForGutters / requestedGutters
+        left = math.floor(left * scale)
+        right = math.floor(right * scale)
+    end
+
+    local rightEdge = outputWidth - right
+
+    if rightEdge <= left then
+        rightEdge = left + 1
+    end
+
+    local fillColour, borderColour = LayoutColours()
+
+    TextRectangle(
+        left,
+        0,
+        rightEdge,
+        outputHeight,
+        0,
+        borderColour,
+        0,
+        fillColour,
+        0
+    )
+
+    effectiveLeft = left
+    effectiveRight = right
+    effectiveTextWidth = rightEdge - left
+
+    DrawGutterBackgrounds(outputWidth, outputHeight)
+end
+
+--------------------------------------------------
+-- COMMANDS
+--------------------------------------------------
+
+local function PrintLayout()
+    if not layoutEnabled then
+        ColourNote("yellow", "", "UI layout: OFF (normal full-width output)")
+        ColourNote("gray", "", "Saved gutters: left " .. configuredLeft .. " px, right " .. configuredRight .. " px")
+        return
+    end
+
+    ColourNote("yellow", "", "UI layout: ON")
+    ColourNote("gray", "", "Theme: " .. CurrentTheme())
+    ColourNote("gray", "", "Configured gutters: left " .. configuredLeft .. " px, right " .. configuredRight .. " px")
+    ColourNote(
+        "gray",
+        "",
+        "Current effective gutters: left " .. effectiveLeft .. " px, right " .. effectiveRight .. " px; MUD text width " .. effectiveTextWidth .. " px"
+    )
+    ColourNote("gray", "", "Gutter backgrounds: " .. (backgroundEnabled and "ON" or "OFF"))
+
+    if backgroundEnabled then
+        ColourNote(
+            leftImageLoaded and "green" or "red",
+            "",
+            "Left image: " .. (leftImageLoaded and "loaded" or "NOT loaded") .. " - " .. leftImagePath
+        )
+        ColourNote(
+            rightImageLoaded and "green" or "red",
+            "",
+            "Right image: " .. (rightImageLoaded and "loaded" or "NOT loaded") .. " - " .. rightImagePath
+        )
+    end
+
+    ColourNote(
+        "gray",
+        "",
+        "Commands: layout <both> | layout <left> <right> | layout off/on | layout bg off/on/reload"
+    )
+end
+
+function LayoutStatus(name, line, wildcards)
+    ApplyLayout()
+    PrintLayout()
+end
+
+function LayoutOff(name, line, wildcards)
+    layoutEnabled = false
+    SaveLayoutState()
+    ApplyLayout()
+    ColourNote("yellow", "", "UI layout disabled.")
+end
+
+function LayoutOn(name, line, wildcards)
+    layoutEnabled = true
+    SaveLayoutState()
+    ApplyLayout()
+    ColourNote(
+        "yellow",
+        "",
+        "UI layout enabled: " .. configuredLeft .. " px left / " .. configuredRight .. " px right."
+    )
+end
+
+function LayoutSymmetric(name, line, wildcards)
+    local gutter = Clamp(wildcards[1], 0, 2000)
+    configuredLeft = gutter
+    configuredRight = gutter
+    layoutEnabled = true
+    SaveLayoutState()
+    ApplyLayout()
+    ColourNote("yellow", "", "UI layout: " .. gutter .. " px on both sides.")
+end
+
+function LayoutAsymmetric(name, line, wildcards)
+    configuredLeft = Clamp(wildcards[1], 0, 2000)
+    configuredRight = Clamp(wildcards[2], 0, 2000)
+    layoutEnabled = true
+    SaveLayoutState()
+    ApplyLayout()
+    ColourNote(
+        "yellow",
+        "",
+        "UI layout: " .. configuredLeft .. " px left / " .. configuredRight .. " px right."
+    )
+end
+
+function LayoutBackgroundOn(name, line, wildcards)
+    backgroundEnabled = true
+    SaveLayoutState()
+    LoadBackgroundImages(true)
+    ApplyLayout()
+    ColourNote("yellow", "", "UI gutter backgrounds enabled.")
+end
+
+function LayoutBackgroundOff(name, line, wildcards)
+    backgroundEnabled = false
+    SaveLayoutState()
+    HideBackgroundWindows()
+    ColourNote("yellow", "", "UI gutter backgrounds disabled.")
+end
+
+function LayoutBackgroundReload(name, line, wildcards)
+    LoadRedBackgroundImages(true)
+    LoadWarningBackgroundImages(true)
+    LoadBackgroundImages(true)
+
+    if CurrentTheme() == "red" then
+        SelectRandomRedPair()
+    elseif CurrentTheme() == "warning" then
+        SelectRandomWarningPair()
+    end
+
+    ApplyLayout()
+    ColourNote("yellow", "", "UI gutter background images reloaded.")
+end
+
+--------------------------------------------------
+-- RED ALERT ANIMATION
+--------------------------------------------------
+
+function HealthAlertAnimationTick()
+
+    local theme =
+        CurrentTheme()
+
+
+    if (
+           theme ~= "red" and
+           theme ~= "warning"
+       ) or
+       not layoutEnabled or
+       not backgroundEnabled
+    then
+        return
+    end
+
+
+    if theme == "red" then
+        SelectRandomRedPair()
+    else
+        SelectRandomWarningPair()
+    end
+
+
+    ApplyLayout()
+end
+
+--------------------------------------------------
+-- CALLBACKS
+--------------------------------------------------
+
+function OnPluginInstall()
+    LoadLayoutState()
+    SaveLayoutState()
+    EnsureBackgroundWindows()
+    SeedRandom()
+    LoadRedBackgroundImages(true)
+    LoadWarningBackgroundImages(true)
+    LoadBackgroundImages(true)
+
+    if CurrentTheme() == "red" then
+        SelectRandomRedPair()
+    elseif CurrentTheme() == "warning" then
+        SelectRandomWarningPair()
+    end
+
+    ApplyLayout()
+end
+
+function OnPluginEnable()
+    LoadLayoutState()
+    EnsureBackgroundWindows()
+    SeedRandom()
+    LoadRedBackgroundImages(false)
+    LoadWarningBackgroundImages(false)
+    LoadBackgroundImages(false)
+
+    if CurrentTheme() == "red" then
+        SelectRandomRedPair()
+    elseif CurrentTheme() == "warning" then
+        SelectRandomWarningPair()
+    end
+
+    ApplyLayout()
+end
+
+function OnPluginDisable()
+    HideBackgroundWindows()
+    TextRectangle(0, 0, 0, 0, 0, 0, 0, 0, 0)
+end
+
+function OnPluginClose()
+    HideBackgroundWindows()
+    TextRectangle(0, 0, 0, 0, 0, 0, 0, 0, 0)
+end
+
+function OnPluginSaveState()
+    SaveLayoutState()
+end
+
+function OnPluginWorldOutputResized()
+    ApplyLayout()
+end
+
+function OnPluginBroadcast(msg, id, name, text)
+    if msg ~= THEME_BROADCAST_MESSAGE or id ~= THEME_CONTROLLER_ID then
+        return
+    end
+
+    LoadBackgroundImages(false)
+
+    if CurrentTheme() == "red" then
+        SelectRandomRedPair()
+
+        currentWarningLeftIndex = nil
+        currentWarningRightIndex = nil
+
+    elseif CurrentTheme() == "warning" then
+        SelectRandomWarningPair()
+
+        currentRedLeftIndex = nil
+        currentRedRightIndex = nil
+
+    else
+        currentRedLeftIndex = nil
+        currentRedRightIndex = nil
+
+        currentWarningLeftIndex = nil
+        currentWarningRightIndex = nil
+    end
+
+    ApplyLayout()
+end
+
+
+
+--------------------------------------------------
+-- PLUGIN CONTROLLER GUTTER API
+--------------------------------------------------
+
+function GetManagedGutterLayout()
+    return
+        tostring(math.floor(configuredLeft)) ..
+        "\t" ..
+        tostring(math.floor(configuredRight))
+end
+
+function ApplyManagedGutterLayout(spec)
+    local left, right =
+        tostring(spec or ""):match("^(-?%d+)%s+(-?%d+)$")
+
+    left = tonumber(left)
+    right = tonumber(right)
+
+    if not left or not right then
+        return "invalid gutter layout"
+    end
+
+    configuredLeft = Clamp(left, 0, 2000)
+    configuredRight = Clamp(right, 0, 2000)
+    layoutEnabled = true
+
+    SaveLayoutState()
+    ApplyLayout()
+    pcall(SaveState)
+
+    return "ok"
+end
+
+]]>
+</script>
+
+</muclient>

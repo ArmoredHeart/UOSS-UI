@@ -1,0 +1,711 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+
+<muclient>
+
+<plugin
+    name="SquareSoft_UI_Installer"
+    author="OpenAI"
+    id="8d6c4e21a9b743f0bc125e78"
+    language="Lua"
+    purpose="Installs/updates the SquareSoft UI suite and applies the bundled saved window layout."
+    date_written="2026-09-14"
+    requires="4.73"
+    version="2.19"
+    save_state="y"
+>
+
+<description trim="y">
+<![CDATA[
+SQUARESOFT UI INSTALLER v2.19
+
+Put this installer and all suite XML files in the same folder.
+
+All static theme gutter graphics plus warning/critical-alert gutter graphics are bundled in this folder.
+
+Production channel note: Autobuff Tracker and Chakra Cooldown are installed with the suite but disabled by default. Users may enable either plugin from MUSHclient's Plugins dialog.
+
+A preconfigured SquareSoft_UI_Layout.txt is bundled and will be loaded
+after all suite plugins have been installed. The Plugin Controller compares the
+saved 1899x968 reference canvas from its 1920x1080 source monitor with the
+recipient's PRIMARY MONITOR resolution. It scales window geometry and gutters
+from monitor size, preserves edge anchoring (including ultrawide layouts), and
+gently scales common UI fonts. The current MUSHclient window size is not used
+to choose the first-install scale.
+
+The MUSHclient WORLD OUTPUT font is standardized to Consolas 11 point before
+layout/gutter restoration, so the text-area geometry is measured against the
+portable suite font rather than an arbitrary local world font. The installer synchronizes both the live font and MUSHclient's serialized
+output_font_* world options. After the final layout/gutter restore it saves the
+WORLD file itself, and also reasserts the font once after startup to avoid
+load-order overrides.
+
+The bundled canonical layout is the author-supplied 1920x1080 profile dated
+2026-09-14 02:55:56. World Map placement is preserved through its hidden
+placeholder phase so its first visible render cannot snap back to 0,0.
+
+Commands:
+  suite install       - reinstall/update plugins, then apply saved layout
+  suite install bare  - reinstall/update plugins WITHOUT applying layout
+  suite layout        - apply SquareSoft_UI_Layout.txt now
+  suite status        - show bundled plugin status
+  suite portable on   - enable the portable world-trigger replacements
+  suite portable off  - disable those portable trigger groups
+  suite portable status - show their state
+  suite path          - show the suite folder
+
+IMPORTANT:
+The initial suite install is deliberately DEFERRED until after this installer's
+own OnPluginInstall callback has returned. This avoids nested/re-entrant plugin
+installation while MUSHclient is still installing the bootstrap plugin.
+
+The installer includes the real Generic_Chat_Miniwindow-based COMMUNICATION
+panel supplied by the suite author plus SquareSoft_Chat_Router.xml, which owns
+its SquareSoft channel/tell capture rules and forwards original MUD style runs.
+Router-caught chat is miniwindow-only: the raw server line is omitted and routed
+through a dedicated no-echo API, so it cannot be duplicated in the main output.
+SquareSoft_Core_Triggers.xml owns the portable status-colour and cooldown-notice
+triggers that previously belonged in the world file.
+]]>
+</description>
+
+</plugin>
+
+<aliases>
+
+
+  <alias
+      name="SquareSoftInstaller_InstallBare"
+      script="SuiteInstallBareAlias"
+      match="^suite\s+install\s+bare$"
+      regexp="y"
+      ignore_case="y"
+      enabled="y"
+      sequence="4"
+  ></alias>
+
+  <alias
+      name="SquareSoftInstaller_Install"
+      script="SuiteInstallAlias"
+      match="^suite\s+install$"
+      regexp="y"
+      ignore_case="y"
+      enabled="y"
+      sequence="5"
+  ></alias>
+
+  <alias
+      name="SquareSoftInstaller_Layout"
+      script="SuiteLayoutAlias"
+      match="^suite\s+layout$"
+      regexp="y"
+      ignore_case="y"
+      enabled="y"
+      sequence="5"
+  ></alias>
+
+
+  <alias
+      name="SquareSoftInstaller_PortableOn"
+      script="SuitePortableOnAlias"
+      match="^suite\s+portable\s+on$"
+      regexp="y"
+      ignore_case="y"
+      enabled="y"
+      sequence="5"
+  ></alias>
+
+  <alias
+      name="SquareSoftInstaller_PortableOff"
+      script="SuitePortableOffAlias"
+      match="^suite\s+portable\s+off$"
+      regexp="y"
+      ignore_case="y"
+      enabled="y"
+      sequence="5"
+  ></alias>
+
+  <alias
+      name="SquareSoftInstaller_PortableStatus"
+      script="SuitePortableStatusAlias"
+      match="^suite\s+portable\s+status$"
+      regexp="y"
+      ignore_case="y"
+      enabled="y"
+      sequence="5"
+  ></alias>
+
+  <alias
+      name="SquareSoftInstaller_Status"
+      script="SuiteStatusAlias"
+      match="^suite\s+status$"
+      regexp="y"
+      ignore_case="y"
+      enabled="y"
+      sequence="5"
+  ></alias>
+
+  <alias
+      name="SquareSoftInstaller_Path"
+      script="SuitePathAlias"
+      match="^suite\s+path$"
+      regexp="y"
+      ignore_case="y"
+      enabled="y"
+      sequence="5"
+  ></alias>
+
+</aliases>
+
+<script>
+<![CDATA[
+
+SELF_ID = GetPluginID()
+PLUGIN_CONTROLLER_ID = "5f2a91c7d3e84b60a1c9e742"
+CORE_TRIGGERS_ID = "f3a9c2e71b4d4068a5c912ef"
+CHAT_ROUTER_ID = "e4b8d2a16c3f4079b5a821dc"
+LAYOUT_FILENAME = "SquareSoft_UI_Layout.txt"
+INSTALLER_VERSION = "2.19"
+WORLD_OUTPUT_FONT_NAME = "Consolas"
+WORLD_OUTPUT_FONT_POINTS = 11
+
+-- Load order matters:
+-- 1) shared theme semantics
+-- 2) gutter/text-area layout
+-- 3) ordinary windows
+-- 4) world-map before automapper
+-- 5) Plugin Controller last, after all windows exist
+SUITE = {
+    { id="43c8d047be7a418ba5e86916", file="UI_Theme_Controller.xml",          name="Theme Controller" },
+    { id="7b4e91c2a6d34f0ca8e12573", file="UI_Layout_Controller.xml",         name="Layout Controller (gutters)" },
+
+    { id="f3a9c2e71b4d4068a5c912ef", file="SquareSoft_Core_Triggers.xml",      name="Core Triggers" },
+
+    { id="e6b4af7c21934f40891cba37", file="Autobuff_Tracker.xml",             name="Autobuff Tracker", default_enabled=false },
+    { id="b27a41c9f0e34d8ab6023117", file="Chakra_Cooldown.xml",              name="Chakra Cooldown", default_enabled=false },
+
+    { id="d47f6a92e1b83c5f0a9e2716", file="HP_MP_Gauges.xml",                name="HP / MP Gauges" },
+    { id="91c7e4a23bf84d1aa0e9c562", file="Status_Effect_Tracker.xml",        name="Status Effect Tracker" },
+    { id="a1b2c3d4e5f60718293a4b5c", file="ExitWindow.xml",                   name="Exit Compass" },
+    { id="6a941f23b8ce4a2d9e7051bc", file="Travel_Alias_Window.xml",          name="Travel Shortcuts" },
+    { id="a1e4bf29c1a8477fa19b2201", file="XP_Rate_Tracker.xml",              name="XP / AP / Gold Rates" },
+    { id="c39d5271e8a04f6b9c418823", file="Enemy_Bestiary_Tracker.xml",       name="Enemy Bestiary Tracker" },
+    { id="7f3e21b0a94d4d73b87c34e2", file="World_Map_Window.xml",             name="World Map Window" },
+    { id="a7c3e91b4d6f2085c1e73a9d", file="SquareSoft_Automapper.xml",        name="SquareSoft Automapper" },
+
+    { id="10778718503f0c91106745f5", file="Generic_Chat_Miniwindow.xml",       name="Communication / Generic Chat" },
+    { id="e4b8d2a16c3f4079b5a821dc", file="SquareSoft_Chat_Router.xml",           name="SquareSoft Chat Router" },
+
+    { id=PLUGIN_CONTROLLER_ID,        file="SquareSoft_Plugin_Controller.xml", name="Plugin Controller" }
+}
+
+function InstallerNote(colour, message)
+    ColourNote(
+        colour or "lime",
+        "",
+        "[SquareSoft Installer] " .. tostring(message or "")
+    )
+end
+
+function SuiteDirectory()
+    local dir = tostring(GetPluginInfo(SELF_ID, 20) or "")
+    if dir == "" then return "" end
+
+    local last = dir:sub(-1)
+    if last ~= "\\" and last ~= "/" then
+        dir = dir .. "\\"
+    end
+
+    return dir
+end
+
+function JoinSuitePath(filename)
+    return SuiteDirectory() .. tostring(filename or "")
+end
+
+function FileExists(path)
+    local f = io.open(path, "rb")
+    if not f then return false end
+    f:close()
+    return true
+end
+
+-- World-output typography is a suite-level presentation setting, not a
+-- miniwindow-layout concern.  Apply it before gutter/layout work because the
+-- layout controller measures the output font when reserving usable text width.
+function ApplyWorldOutputFont(announce)
+    -- SetOutputFont changes the live display, but the world serializer writes
+    -- output_font_name/output_font_height/output_font_weight.  Keep both the
+    -- live font and the serialized world options synchronized.
+    local ok, err = pcall(
+        SetOutputFont,
+        WORLD_OUTPUT_FONT_NAME,
+        WORLD_OUTPUT_FONT_POINTS
+    )
+
+    if not ok then
+        if announce ~= false then
+            InstallerNote(
+                "red",
+                "Could not set output font to " ..
+                WORLD_OUTPUT_FONT_NAME .. " " ..
+                tostring(WORLD_OUTPUT_FONT_POINTS) ..
+                " pt: " .. tostring(err)
+            )
+        end
+        return false
+    end
+
+    -- IMPORTANT: despite the public option table describing output_font_height
+    -- as pixels, MUSHclient's ChangeFont implementation treats the stored value
+    -- as a POINT SIZE and converts it to pixels internally with MulDiv(..., DPI, 72).
+    -- Therefore persist 11 here.  Do NOT persist GetInfo(212), which is the
+    -- rendered pixel height and would reopen as an ~18-point font on common DPI.
+    local rcName = SetAlphaOption("output_font_name", WORLD_OUTPUT_FONT_NAME)
+    local rcHeight = SetOption("output_font_height", WORLD_OUTPUT_FONT_POINTS)
+    local rcWeight = SetOption("output_font_weight", 400)
+
+    local optionsOK =
+        rcName == error_code.eOK and
+        rcHeight == error_code.eOK and
+        rcWeight == error_code.eOK
+
+    if announce ~= false then
+        if optionsOK then
+            InstallerNote(
+                "gray",
+                "World output font: " .. WORLD_OUTPUT_FONT_NAME ..
+                " " .. tostring(WORLD_OUTPUT_FONT_POINTS) ..
+                " pt (saved size " .. tostring(WORLD_OUTPUT_FONT_POINTS) .. ")."
+            )
+        else
+            InstallerNote(
+                "yellow",
+                "Consolas 11 is active, but one or more persistent world-font " ..
+                "options could not be changed (name=" .. tostring(rcName) ..
+                ", height=" .. tostring(rcHeight) ..
+                ", weight=" .. tostring(rcWeight) .. ")."
+            )
+        end
+    end
+
+    return optionsOK
+end
+
+function ScheduleWorldOutputFontReassert()
+    -- Some MUSHclient builds finish applying world display options after plugins
+    -- begin loading.  Reassert once after startup so load order cannot undo the
+    -- suite font in the live session.
+    DoAfterSpecial(
+        0.75,
+        "ApplyWorldOutputFont(false)",
+        sendto.script
+    )
+end
+
+-- SetOutputFont changes the live world, but MUSHclient only makes that change
+-- permanent when the WORLD file is saved. SaveState() is plugin-state only.
+-- Persist after layout/gutter restoration so all suite-owned world presentation
+-- settings reach disk together.
+function PersistSuiteWorldSettings(announce)
+    local worldPath = tostring(GetInfo(54) or "")
+
+    if worldPath == "" then
+        if announce ~= false then
+            InstallerNote(
+                "yellow",
+                "Consolas 11 is active, but this world has no saved .mcl path yet. " ..
+                "Save the world once to make it permanent."
+            )
+        end
+        return false
+    end
+
+    local ok, saveFailed = pcall(Save, "")
+
+    -- Lua's MUSHclient Save() return is inverted: false means success,
+    -- true means the save failed.
+    if not ok or saveFailed == true then
+        if announce ~= false then
+            InstallerNote(
+                "red",
+                "Could not save world settings to " .. worldPath ..
+                (not ok and (": " .. tostring(saveFailed)) or ".")
+            )
+        end
+        return false
+    end
+
+    if announce ~= false then
+        InstallerNote(
+            "lime",
+            "Saved world settings (including Consolas 11) to " .. worldPath
+        )
+    end
+
+    return true
+end
+
+function UnloadBundledPlugins()
+    -- Unload in reverse order so dependants disappear before their providers.
+    for i = #SUITE, 1, -1 do
+        local item = SUITE[i]
+
+        if IsPluginInstalled(item.id) then
+            local rc = UnloadPlugin(item.id)
+
+            if rc ~= error_code.eOK then
+                InstallerNote(
+                    "red",
+                    "Could not unload " .. item.name ..
+                    " (error " .. tostring(rc) .. ")."
+                )
+                return false
+            end
+        end
+    end
+
+    return true
+end
+
+function LoadBundledPlugins()
+    local loaded = 0
+
+    for _, item in ipairs(SUITE) do
+        local path = JoinSuitePath(item.file)
+
+        if not FileExists(path) then
+            InstallerNote("red", "Missing file: " .. path)
+            return false
+        end
+
+        local rc = LoadPlugin(path)
+
+        if rc ~= error_code.eOK then
+            InstallerNote(
+                "red",
+                "Could not load " .. item.name ..
+                " (error " .. tostring(rc) .. ")."
+            )
+            return false
+        end
+
+        loaded = loaded + 1
+
+        if item.default_enabled == false then
+            local enableRc = EnablePlugin(item.id, false)
+            if enableRc ~= error_code.eOK then
+                InstallerNote(
+                    "red",
+                    "Loaded " .. item.name ..
+                    " but could not apply its disabled-by-default state (error " ..
+                    tostring(enableRc) .. ")."
+                )
+                return false
+            end
+
+            InstallerNote(
+                "gray",
+                "Loaded " .. item.name .. " (installed disabled by production default)"
+            )
+        else
+            InstallerNote("gray", "Loaded " .. item.name)
+        end
+    end
+
+    InstallerNote("lime", tostring(loaded) .. " bundled plugins loaded.")
+    return true
+end
+
+function BundledLayoutPath()
+    return JoinSuitePath(LAYOUT_FILENAME)
+end
+
+function ApplyBundledLayout()
+    ApplyWorldOutputFont(false)
+
+    local path = BundledLayoutPath()
+
+    if not FileExists(path) then
+        InstallerNote(
+            "yellow",
+            "No " .. LAYOUT_FILENAME ..
+            " found. Plugins are installed, but no shared window layout was applied."
+        )
+        InstallerNote(
+            "gray",
+            "Put your saved " .. LAYOUT_FILENAME ..
+            " beside the installer and use 'suite layout'."
+        )
+        -- Even without a layout file, persist the suite font if possible.
+        PersistSuiteWorldSettings(false)
+        return false
+    end
+
+    if not IsPluginInstalled(PLUGIN_CONTROLLER_ID) then
+        InstallerNote("red", "Plugin Controller is not installed.")
+        return false
+    end
+
+    if PluginSupports(PLUGIN_CONTROLLER_ID, "LoadLayout") ~= error_code.eOK then
+        InstallerNote("red", "Installed Plugin Controller does not support LoadLayout.")
+        return false
+    end
+
+    local rc, result =
+        CallPlugin(
+            PLUGIN_CONTROLLER_ID,
+            "LoadLayout",
+            ""
+        )
+
+    if rc ~= error_code.eOK then
+        InstallerNote(
+            "red",
+            "Plugin Controller could not load the layout (error " ..
+            tostring(rc) .. ")."
+        )
+        return false
+    end
+
+    InstallerNote("lime", "Applied " .. LAYOUT_FILENAME .. ".")
+
+    -- This is intentionally a WORLD save, not SaveState().  It persists the
+    -- output font plus world-level gutter/text-area settings applied above.
+    PersistSuiteWorldSettings(true)
+    return true
+end
+
+function ScheduleBundledLayout()
+    -- Loading plugins is synchronous, but giving their OnPluginInstall callbacks
+    -- and first miniwindow redraws one second to settle makes the imported layout
+    -- deterministic. This is a one-shot MUSHclient timer.
+    DoAfterSpecial(
+        1.0,
+        "ApplyBundledLayout()",
+        sendto.script
+    )
+end
+
+function SetPortableTriggerState(enabled)
+    local value = enabled and "true" or "false"
+    local ok = true
+
+    for _, id in ipairs({CORE_TRIGGERS_ID, CHAT_ROUTER_ID}) do
+        if not IsPluginInstalled(id) then
+            ok = false
+            InstallerNote("red", "Portable trigger plugin is not installed: " .. id)
+        elseif PluginSupports(id, "SetPortableEnabled") ~= error_code.eOK then
+            ok = false
+            InstallerNote("red", "Portable trigger plugin lacks SetPortableEnabled: " .. id)
+        else
+            local rc = CallPlugin(id, "SetPortableEnabled", value)
+            if rc ~= error_code.eOK then
+                ok = false
+                InstallerNote("red", "Could not change portable trigger state for " .. id .. " (error " .. tostring(rc) .. ").")
+            end
+        end
+    end
+
+    SetVariable("portable_triggers_enabled", enabled and "1" or "0")
+    if enabled then SetVariable("portable_migration_pending", "0") end
+    return ok
+end
+
+function InstallSuite(applyLayout, disablePortableForMigration)
+    InstallerNote("cyan", "Installing SquareSoft UI suite...")
+    ApplyWorldOutputFont(true)
+
+    local savedPortableState = tostring(GetVariable("portable_triggers_enabled") or "")
+
+    if not UnloadBundledPlugins() then
+        return false
+    end
+
+    if not LoadBundledPlugins() then
+        return false
+    end
+
+    if disablePortableForMigration then
+        SetPortableTriggerState(false)
+        SetVariable("portable_migration_pending", "1")
+        InstallerNote("yellow", "Portable v2.0 trigger replacements were installed DISABLED to avoid double-firing with your existing world triggers.")
+        InstallerNote("yellow", "Disable/delete the old world copies, then type: suite portable on")
+    elseif savedPortableState == "0" then
+        SetPortableTriggerState(false)
+    elseif savedPortableState == "1" then
+        SetPortableTriggerState(true)
+    else
+        -- Fresh install: the portable plugins default to enabled. Record that
+        -- choice so later forced reinstalls preserve it deterministically.
+        SetVariable("portable_triggers_enabled", "1")
+        SetVariable("portable_migration_pending", "0")
+    end
+
+    SetVariable("suite_installed_once", "1")
+    SetVariable("suite_installed_version", INSTALLER_VERSION)
+    SaveState()
+
+    if applyLayout ~= false then
+        ScheduleBundledLayout()
+
+        InstallerNote(
+            "lime",
+            "Install complete. Saved layout will be applied in about one second."
+        )
+    else
+        InstallerNote(
+            "lime",
+            "Bare install complete. Layout was NOT applied."
+        )
+        InstallerNote(
+            "gray",
+            "Test the resize handles now; then use 'suite layout' separately."
+        )
+
+        -- Bare installs still own the portable font. Save it after the current
+        -- installer callback unwinds rather than requiring File -> Save manually.
+        DoAfterSpecial(
+            0.25,
+            "PersistSuiteWorldSettings(true)",
+            sendto.script
+        )
+    end
+
+    return true
+end
+
+function SuiteInstallAlias()
+    InstallSuite(true, false)
+end
+
+function SuiteInstallBareAlias()
+    InstallSuite(false, false)
+end
+
+function SuitePortableOnAlias()
+    if SetPortableTriggerState(true) then
+        InstallerNote("lime", "Portable trigger replacements ENABLED.")
+    end
+end
+
+function SuitePortableOffAlias()
+    if SetPortableTriggerState(false) then
+        InstallerNote("yellow", "Portable trigger replacements DISABLED.")
+    end
+end
+
+function SuitePortableStatusAlias()
+    local pending = GetVariable("portable_migration_pending") == "1"
+    local enabled = GetVariable("portable_triggers_enabled") ~= "0"
+    InstallerNote(enabled and "lime" or "yellow", "Portable trigger replacements: " .. (enabled and "ON" or "OFF"))
+    if pending then
+        InstallerNote("yellow", "Migration pending: disable/delete the old world trigger copies, then use 'suite portable on'.")
+    end
+end
+
+function SuiteLayoutAlias()
+    ApplyBundledLayout()
+end
+
+function SuitePathAlias()
+    InstallerNote("cyan", "Suite folder:")
+    Note(SuiteDirectory())
+    InstallerNote("cyan", "Expected layout file:")
+    Note(BundledLayoutPath())
+end
+
+function SuiteStatusAlias()
+    InstallerNote("cyan", "Bundled plugin status:")
+
+    for _, item in ipairs(SUITE) do
+        local status =
+            IsPluginInstalled(item.id)
+            and "installed"
+            or "NOT installed"
+
+        Note("  " .. item.name .. " : " .. status)
+    end
+
+    Note(
+        "  " .. LAYOUT_FILENAME .. " : " ..
+        (FileExists(BundledLayoutPath()) and "present" or "NOT present")
+    )
+end
+
+function DeferredInitialSuiteInstall()
+    SetVariable("initial_install_pending", "0")
+
+    local installedVersion =
+        tostring(GetVariable("suite_installed_version") or "")
+
+    if installedVersion == INSTALLER_VERSION then
+        InstallerNote(
+            "gray",
+            "Suite v" .. INSTALLER_VERSION .. " is already current."
+        )
+        return
+    end
+
+    InstallerNote(
+        "cyan",
+        "Deferred bootstrap is now loading suite v" ..
+        INSTALLER_VERSION .. "..."
+    )
+
+    -- The one-time world-trigger migration is only needed when crossing from
+    -- the old v1.x suite into v2+.  Normal v2.x upgrades preserve the user's
+    -- current portable-trigger state instead of switching it off again.
+    local upgradingFromV1 =
+        installedVersion ~= "" and
+        not installedVersion:match("^2%.")
+
+    InstallSuite(true, upgradingFromV1)
+end
+
+function QueueInitialSuiteInstall()
+    if GetVariable("initial_install_pending") == "1" then
+        return
+    end
+
+    SetVariable("initial_install_pending", "1")
+
+    InstallerNote(
+        "cyan",
+        "Suite update queued until installer initialization has finished."
+    )
+
+    DoAfterSpecial(
+        0.5,
+        "DeferredInitialSuiteInstall()",
+        sendto.script
+    )
+end
+
+function OnPluginInstall()
+    -- Reassert the package's world-output font whenever this installer is loaded.
+    -- This keeps the portable profile deterministic even if the local world file
+    -- was created with a different output font.
+    ApplyWorldOutputFont(false)
+    ScheduleWorldOutputFontReassert()
+
+    local installedVersion =
+        tostring(GetVariable("suite_installed_version") or "")
+
+    if installedVersion ~= INSTALLER_VERSION then
+        QueueInitialSuiteInstall()
+    else
+        SetVariable("initial_install_pending", "0")
+
+        InstallerNote(
+            "gray",
+            "Suite v" .. INSTALLER_VERSION ..
+            " already installed. Use 'suite install' to force reinstall."
+        )
+    end
+end
+
+]]>
+</script>
+
+</muclient>

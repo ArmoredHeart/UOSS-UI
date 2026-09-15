@@ -1,0 +1,2566 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+
+<muclient>
+
+<plugin
+    name="World_Map_Window"
+    author="ChatGPT"
+    id="7f3e21b0a94d4d73b87c34e2"
+    language="Lua"
+    purpose="Displays the overworld map and exposes its literal 9x9 grid to the automapper"
+    date_written="2026-09-07"
+    version="2.14"
+    save_state="y"
+    sequence="4100"
+>
+
+<description trim="y">
+<![CDATA[
+WORLD MAP WINDOW v2.13
+
+Uses persistent overworld visual memory. Previously-seen 9x9 views are reconstructed instantly from the Automapper database, while real MUD map probes are reserved for unknown cells, localization, and boundary confirmation.
+
+The miniwindow:
+  - uses the current room name as its title
+  - sizes itself to fit the 9 x 9 map and title
+  - preserves the original colours sent by the MUD
+  - remains draggable
+  - hides automatically in areas with no map
+  - broadcasts authoritative OVERWORLD/MAPPABLE state to sibling plugins
+  - keeps OVERWORLD presentation sticky until live evidence proves a local boundary
+  - redraws memorized overworld cells immediately on every known movement
+  - requests the real MUD map only when the current 9x9 contains unknown cells or needs authoritative localization
+  - keeps speedwalk-safe debouncing only for genuinely necessary live probes
+  - exposes the current literal 9 x 9 grid to the navigation mapper
+
+COMMANDS:
+
+  mapwin show
+  mapwin hide
+  mapwin refresh   (force a live MUD map capture and relearn this 9x9)
+]]>
+
+Modular theme client: colours are supplied by UI_Theme_Controller v2.0 when available.
+</description>
+
+</plugin>
+
+
+<triggers>
+
+    <trigger
+        name="WorldMap_RoomHeader"
+        script="OnRoomHeader"
+        match="^(.+) \[exits: (.*)\]$"
+        regexp="y"
+        ignore_case="y"
+        enabled="y"
+        keep_evaluating="y"
+        sequence="80"
+    ></trigger>
+
+
+    <trigger
+        name="WorldMap_MapHeader"
+        script="BeginMapCapture"
+        match="^Map of the surrounding area:\s*$"
+        regexp="y"
+        ignore_case="y"
+        enabled="n"
+        omit_from_output="y"
+        keep_evaluating="y"
+        sequence="81"
+    ></trigger>
+
+
+    <trigger
+        name="WorldMap_NoMap"
+        script="OnNoMap"
+        match="^This area has no map\.$"
+        regexp="y"
+        ignore_case="y"
+        enabled="n"
+        omit_from_output="y"
+        keep_evaluating="y"
+        sequence="81"
+    ></trigger>
+
+
+    <trigger
+        name="WorldMap_CaptureRow"
+        script="CaptureMapRow"
+        match="^.{9}$"
+        regexp="y"
+        ignore_case="n"
+        enabled="n"
+        omit_from_output="y"
+        keep_evaluating="y"
+        sequence="82"
+    ></trigger>
+
+
+    <trigger
+        name="WorldMap_SuppressMapRows"
+        match="^.{9}$"
+        regexp="y"
+        ignore_case="n"
+        enabled="n"
+        omit_from_output="y"
+        keep_evaluating="y"
+        sequence="83"
+    ></trigger>
+
+</triggers>
+
+
+<aliases>
+
+    <alias
+        name="WorldMap_Show"
+        script="mapwin_show"
+        match="^mapwin show$"
+        regexp="y"
+        ignore_case="y"
+        enabled="y"
+        sequence="100"
+    ></alias>
+
+
+    <alias
+        name="WorldMap_Hide"
+        script="mapwin_hide"
+        match="^mapwin hide$"
+        regexp="y"
+        ignore_case="y"
+        enabled="y"
+        sequence="100"
+    ></alias>
+
+    <alias
+        name="WorldMap_Refresh"
+        script="mapwin_refresh"
+        match="^mapwin refresh$"
+        regexp="y"
+        ignore_case="y"
+        enabled="y"
+        sequence="100"
+    ></alias>
+
+</aliases>
+
+
+<timers>
+
+    <timer
+        name="WorldMap_TimeoutTimer"
+        second="0.05"
+        enabled="y"
+        script="PollMapTimeout"
+    ></timer>
+
+</timers>
+
+
+<script>
+<![CDATA[
+
+require "movewindow"
+
+Win = GetPluginID()
+
+
+--------------------------------------------------
+-- MAP FORMAT
+--------------------------------------------------
+
+MAP_ROWS = 9
+MAP_COLUMNS = 9
+
+
+--------------------------------------------------
+-- TIMEOUTS
+--------------------------------------------------
+
+MAP_HEADER_TIMEOUT  = 3.0
+MAP_CAPTURE_TIMEOUT = 3.0
+
+-- Do not inject an automatic "map" command while room headers are still arriving.
+-- Native/client speedwalks can deliver many rooms in a tight burst; issuing probes
+-- from inside that burst leaves map commands queued behind movement and can produce
+-- visible "This area has no map." lines after the speedwalk has already finished.
+MAP_REQUEST_SETTLE_TIME = 0.35
+
+
+--------------------------------------------------
+-- COMPACT WINDOW LAYOUT
+--------------------------------------------------
+
+TITLE_HEIGHT = 21
+
+FONT_NAME = "Lucida Console"
+
+MAP_FONT_SIZE = 12
+
+TITLE_FONT_MAX_SIZE = 9
+TITLE_FONT_MIN_SIZE = 4
+
+MAP_LINE_HEIGHT = 15
+
+SIDE_PADDING = 7
+TOP_PADDING = 5
+BOTTOM_PADDING = 6
+
+TITLE_SIDE_PADDING = 6
+
+-- Keep the map window a little wider than the raw 9-column map.
+-- 1.25 = 25% wider.
+WINDOW_WIDTH_MULTIPLIER = 1.25
+
+
+WINDOW_WIDTH = tonumber(GetVariable("worldmap_width"))
+WINDOW_HEIGHT = tonumber(GetVariable("worldmap_height"))
+
+MIN_WINDOW_WIDTH = 105
+MIN_WINDOW_HEIGHT = 105
+RESIZE_GRIP_SIZE = 14
+worldMapResizeActive = false
+
+-- A hidden/placeholder miniwindow is not a trustworthy source of screen
+-- coordinates in MUSHclient.  Keep the movewindow/restored position authoritative
+-- until the first real visible map render has created the final window.
+managedLayoutPositionPending = true
+worldMapSurfaceReady = false
+worldMapSurfaceWidth = 0
+worldMapSurfaceHeight = 0
+
+function SaveWorldMapWindowSize()
+    if WINDOW_WIDTH and WINDOW_HEIGHT then
+        SetVariable("worldmap_width", tostring(math.floor(WINDOW_WIDTH)))
+        SetVariable("worldmap_height", tostring(math.floor(WINDOW_HEIGHT)))
+    end
+end
+
+function FitMapFontForDimensions(width, height)
+    if not width or not height then return end
+
+    local chosen = 5
+
+    for size = 18, 5, -1 do
+        WindowFont(Win, "map"..Win, FONT_NAME, size, false)
+        WindowFont(Win, "mapbold"..Win, FONT_NAME, size, true)
+
+        local cw = WindowTextWidth(Win, "map"..Win, "M")
+        local lineH = size + 3
+        local needW = cw * MAP_COLUMNS + SIDE_PADDING * 2 + 4
+        local needH = TITLE_HEIGHT + TOP_PADDING + MAP_ROWS * lineH + BOTTOM_PADDING + 4
+
+        if needW <= width and needH <= height then
+            chosen = size
+            break
+        end
+    end
+
+    MAP_LINE_HEIGHT = chosen + 3
+    WindowFont(Win, "map"..Win, FONT_NAME, chosen, false)
+    WindowFont(Win, "mapbold"..Win, FONT_NAME, chosen, true)
+end
+
+function WorldMapResizeMouseDown(flags, hotspot_id)
+    worldMapResizeActive = true
+    return 0
+end
+
+function UpdateWorldMapResizeFromMouse()
+    local mx = tonumber(WindowInfo(Win, 17))
+    local my = tonumber(WindowInfo(Win, 18))
+    local left = tonumber(WindowInfo(Win, 10)) or tonumber(WindowInfo(Win, 1)) or 0
+    local top = tonumber(WindowInfo(Win, 11)) or tonumber(WindowInfo(Win, 2)) or 0
+
+    if not mx or not my then
+        return false
+    end
+
+    WINDOW_WIDTH = math.max(MIN_WINDOW_WIDTH, math.floor(mx - left + 1))
+    WINDOW_HEIGHT = math.max(MIN_WINDOW_HEIGHT, math.floor(my - top + 1))
+
+    WindowResize(Win, WINDOW_WIDTH, WINDOW_HEIGHT, BACKGROUND_COLOUR)
+    Redraw()
+    return true
+end
+
+function WorldMapResizeMouseMove(flags, hotspot_id)
+    if worldMapResizeActive then
+        UpdateWorldMapResizeFromMouse()
+    end
+
+    SetCursor(miniwin.cursor_nw_se_arrow)
+    return 0
+end
+
+function WorldMapResizeMouseUp(flags, hotspot_id)
+    if worldMapResizeActive then
+        UpdateWorldMapResizeFromMouse()
+    end
+
+    worldMapResizeActive = false
+    SaveWorldMapWindowSize()
+    RenderMapWindow()
+    pcall(SaveState)
+    return 0
+end
+
+function InstallWorldMapResizeHandle()
+    if not WINDOW_WIDTH or not WINDOW_HEIGHT then return end
+
+    WindowDeleteHotspot(Win, "00_resize")
+
+    WindowAddHotspot(
+        Win,
+        "00_resize",
+        WINDOW_WIDTH - RESIZE_GRIP_SIZE,
+        WINDOW_HEIGHT - RESIZE_GRIP_SIZE,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        "",
+        "",
+        "WorldMapResizeMouseDown",
+        "",
+        "",
+        "Drag to resize",
+        miniwin.cursor_nw_se_arrow,
+        0
+    )
+
+    WindowDragHandler(
+        Win,
+        "00_resize",
+        "WorldMapResizeMouseMove",
+        "WorldMapResizeMouseUp",
+        0
+    )
+
+    WindowLine(
+        Win,
+        WINDOW_WIDTH - 11,
+        WINDOW_HEIGHT - 3,
+        WINDOW_WIDTH - 3,
+        WINDOW_HEIGHT - 11,
+        BORDER_COLOUR,
+        miniwin.pen_solid,
+        1
+    )
+
+    WindowLine(
+        Win,
+        WINDOW_WIDTH - 7,
+        WINDOW_HEIGHT - 3,
+        WINDOW_WIDTH - 3,
+        WINDOW_HEIGHT - 7,
+        BORDER_COLOUR,
+        miniwin.pen_solid,
+        1
+    )
+end
+
+
+
+--------------------------------------------------
+-- SHARED UI THEMES
+--
+-- IMPORTANT:
+-- These colours affect ONLY the miniwindow chrome.
+-- The captured 9 x 9 map cells continue to use the
+-- exact text/background colours sent by the MUD.
+--------------------------------------------------
+
+THEME_CONTROLLER_ID =
+    "43c8d047be7a418ba5e86916"
+
+THEME_BROADCAST_MESSAGE = 9042
+
+
+--------------------------------------------------
+-- MODULAR THEME CLIENT
+--
+-- The controller owns the real palette. The local THEMES table
+-- below is retained only as a safe fallback if the controller
+-- is unavailable.
+--------------------------------------------------
+
+local THEME_PROFILE =
+    "map"
+
+
+function ThemeColour(
+    role,
+    fallback
+)
+
+    local rc,
+          value =
+        CallPlugin(
+            THEME_CONTROLLER_ID,
+            "GetThemeColour",
+            THEME_PROFILE,
+            role
+        )
+
+
+    if rc ==
+       error_code.eOK and
+       type(
+           value
+       ) ==
+       "string" and
+       value ~=
+       ""
+    then
+
+        return
+            ColourNameToRGB(
+                value
+            )
+
+    end
+
+
+    return
+        ColourNameToRGB(
+            fallback
+        )
+end
+
+
+THEMES = {
+
+    classic = {
+        background = "#000000",
+        border = "#808080",
+        title_bar = "darkslategray",
+        title = "gold"
+    },
+
+    amber = {
+        background = "#050301",
+        border = "#6B3D18",
+        title_bar = "#160B03",
+        title = "#FFB347"
+    },
+
+    default = {
+        background = "#000500",
+        border = "#285B28",
+        title_bar = "#061306",
+        title = "#9AFF82"
+    }
+}
+
+function LoadTheme()
+
+    local theme =
+        GetPluginVariable(
+            THEME_CONTROLLER_ID,
+            "theme"
+        )
+
+    if not THEMES[theme] then
+        theme = "default"
+    end
+
+    local T = THEMES[theme]
+
+    BACKGROUND_COLOUR =
+        ThemeColour("background", T.background)
+
+    BORDER_COLOUR =
+        ThemeColour("border", T.border)
+
+    TITLE_BAR_COLOUR =
+        ThemeColour("title_bar", T.title_bar)
+
+    TITLE_COLOUR =
+        ThemeColour("title", T.title)
+end
+
+LoadTheme()
+
+
+--------------------------------------------------
+-- STYLE FALLBACK
+--------------------------------------------------
+
+MAP_FALLBACK_TEXT =
+    ColourNameToRGB("#FFFFFF")
+
+MAP_FALLBACK_BACKGROUND =
+    ColourNameToRGB("#000000")
+
+
+--------------------------------------------------
+-- WINDOW STATE
+--------------------------------------------------
+
+windowinfo = ""
+
+windowManuallyHidden = false
+
+
+--------------------------------------------------
+-- LOCATION-CLASSIFICATION BROADCAST
+--
+-- A successful 9x9 map capture means this room belongs to the
+-- overworld. The local schematic mapper excludes it from presentation, while
+-- v1.6+ still consumes the literal grid for hidden navigation.
+-- "This area has no map." means it is a normal local mappable room.
+--------------------------------------------------
+
+WORLD_MAP_STATE_BROADCAST_MESSAGE = 9043
+AUTOMAPPER_PLUGIN_ID = "a7c3e91b4d6f2085c1e73a9d"
+currentMapState = "UNKNOWN"
+
+function BroadcastMapState(state, roomName)
+    currentMapState = state or "UNKNOWN"
+    BroadcastPlugin(
+        WORLD_MAP_STATE_BROADCAST_MESSAGE,
+        currentMapState .. "\t" .. tostring(roomName or currentRoomName or "")
+    )
+end
+
+function GetWorldMapState()
+    return currentMapState or "UNKNOWN"
+end
+
+function GetWorldMapRoomName()
+    return currentRoomName or ""
+end
+
+function GetWorldMapExitList()
+    return currentExitText or ""
+end
+
+-- The automapper deliberately does not duplicate the world-map parser.
+-- It asks this plugin for the exact 9 x 9 text grid after an OVERWORLD
+-- state broadcast.  Rows are separated with ASCII record separator (30)
+-- so literal spaces in the map are preserved unchanged.
+WORLD_MAP_GRID_ROW_SEP = string.char(30)
+
+function GetWorldMapGrid()
+    local rows = {}
+    for i = 1, MAP_ROWS do
+        local row = displayedMapLines[i]
+        table.insert(rows, row and tostring(row.text or "") or "")
+    end
+    return table.concat(rows, WORLD_MAP_GRID_ROW_SEP)
+end
+
+
+gridCaptureSerial = 0
+
+function GetWorldMapGridSerial()
+    return tostring(gridCaptureSerial or 0)
+end
+
+
+--------------------------------------------------
+-- STYLED GRID EXPORT + PERSISTENT MEMORY CLIENT
+--------------------------------------------------
+
+WORLD_VISUAL_ROW_SEP = string.char(30)
+WORLD_VISUAL_CELL_SEP = string.char(29)
+WORLD_VISUAL_FIELD_SEP = string.char(31)
+
+function SplitLiteral(value, separator)
+    local result = {}
+    value = tostring(value or "")
+    separator = tostring(separator or "")
+    if separator == "" then return {value} end
+    local start = 1
+    while true do
+        local pos = value:find(separator, start, true)
+        if not pos then
+            table.insert(result, value:sub(start))
+            break
+        end
+        table.insert(result, value:sub(start, pos - 1))
+        start = pos + #separator
+    end
+    return result
+end
+
+function HexEncodeText(value)
+    value = tostring(value or "")
+    local out = {}
+    for i = 1, #value do
+        table.insert(out, string.format("%02X", value:byte(i)))
+    end
+    return table.concat(out)
+end
+
+function HexDecodeText(value)
+    value = tostring(value or "")
+    if value == "" then return "" end
+    if (#value % 2) ~= 0 or value:find("[^0-9A-Fa-f]") then return "" end
+    local out = {}
+    for i = 1, #value, 2 do
+        table.insert(out, string.char(tonumber(value:sub(i, i + 1), 16) or 0))
+    end
+    return table.concat(out)
+end
+
+playerMarker = nil
+playerMarkerWorldKey = ""
+
+function SavePlayerMarker()
+    if not playerMarker then return end
+    SetVariable("worldmap_player_glyph", HexEncodeText(playerMarker.char or ""))
+    SetVariable("worldmap_player_fg", tostring(playerMarker.textcolour or MAP_FALLBACK_TEXT))
+    SetVariable("worldmap_player_bg", tostring(playerMarker.backcolour or MAP_FALLBACK_BACKGROUND))
+    SetVariable("worldmap_player_style", tostring(playerMarker.style or 0))
+    SetVariable("worldmap_player_world_key", tostring(playerMarkerWorldKey or ""))
+end
+
+function LoadPlayerMarker()
+    local glyph = HexDecodeText(GetVariable("worldmap_player_glyph") or "")
+    if glyph == "" then return end
+    playerMarker = {
+        char = glyph,
+        textcolour = tonumber(GetVariable("worldmap_player_fg")) or MAP_FALLBACK_TEXT,
+        backcolour = tonumber(GetVariable("worldmap_player_bg")) or MAP_FALLBACK_BACKGROUND,
+        style = tonumber(GetVariable("worldmap_player_style")) or 0
+    }
+    playerMarkerWorldKey = tostring(GetVariable("worldmap_player_world_key") or "")
+end
+
+function CapturePlayerMarkerFromDisplayedGrid()
+    local row = displayedMapLines[5]
+    if not row then return end
+    local cells = BuildStyleCells(row)
+    local cell = cells and cells[5] or nil
+    if not cell then return end
+    playerMarker = {
+        char = cell.char or " ",
+        textcolour = cell.textcolour or MAP_FALLBACK_TEXT,
+        backcolour = cell.backcolour or MAP_FALLBACK_BACKGROUND,
+        style = cell.style or 0
+    }
+    SavePlayerMarker()
+end
+
+function GetWorldMapStyledGrid()
+    if #displayedMapLines ~= 9 then return "" end
+    local encodedRows = {}
+    for rowIndex = 1, 9 do
+        local cells = BuildStyleCells(displayedMapLines[rowIndex])
+        local encodedCells = {}
+        for colIndex = 1, 9 do
+            local cell = cells[colIndex]
+            encodedCells[colIndex] = table.concat({
+                HexEncodeText(cell.char or " "),
+                tostring(tonumber(cell.textcolour) or MAP_FALLBACK_TEXT),
+                tostring(tonumber(cell.backcolour) or MAP_FALLBACK_BACKGROUND),
+                tostring(tonumber(cell.style) or 0)
+            }, WORLD_VISUAL_FIELD_SEP)
+        end
+        encodedRows[rowIndex] = table.concat(encodedCells, WORLD_VISUAL_CELL_SEP)
+    end
+    return table.concat(encodedRows, WORLD_VISUAL_ROW_SEP)
+end
+
+function AskAutomapperMemoryStyledGrid()
+    if PluginSupports(AUTOMAPPER_PLUGIN_ID, "GetWorldMemoryStyledGrid") ~= error_code.eOK then return nil end
+    local rc, value = CallPlugin(AUTOMAPPER_PLUGIN_ID, "GetWorldMemoryStyledGrid")
+    if rc ~= error_code.eOK or type(value) ~= "string" or value == "" then return nil end
+    return value
+end
+
+function AskAutomapperAutoWalkActive()
+    if PluginSupports(AUTOMAPPER_PLUGIN_ID, "IsAutoWalkActiveForWorldMap") ~= error_code.eOK then return false end
+    local rc, value = CallPlugin(AUTOMAPPER_PLUGIN_ID, "IsAutoWalkActiveForWorldMap")
+    return rc == error_code.eOK and tostring(value) == "1"
+end
+
+function CurrentAutomapperWorldKey()
+    if PluginSupports(AUTOMAPPER_PLUGIN_ID, "GetCurrentWorldCoordinateKey") ~= error_code.eOK then return "" end
+    local rc, value = CallPlugin(AUTOMAPPER_PLUGIN_ID, "GetCurrentWorldCoordinateKey")
+    if rc ~= error_code.eOK or type(value) ~= "string" then return "" end
+    return value
+end
+
+function TagPlayerMarkerToCurrentWorldCell()
+    local key = CurrentAutomapperWorldKey()
+    if key == "" then return end
+    playerMarkerWorldKey = key
+    SavePlayerMarker()
+end
+
+function DecodeMemoryStyledGrid(value)
+    local encodedRows = SplitLiteral(value, WORLD_VISUAL_ROW_SEP)
+    if #encodedRows ~= 9 then return nil, 81 end
+    local rows = {}
+    local unknown = 0
+    local markerCurrent = playerMarker ~= nil and playerMarkerWorldKey ~= "" and
+        playerMarkerWorldKey == CurrentAutomapperWorldKey()
+
+    for rowIndex = 1, 9 do
+        local encodedCells = SplitLiteral(encodedRows[rowIndex], WORLD_VISUAL_CELL_SEP)
+        if #encodedCells ~= 9 then return nil, 81 end
+        local rowCells = {}
+        local textParts = {}
+        local styleRuns = {}
+
+        for colIndex = 1, 9 do
+            local fields = SplitLiteral(encodedCells[colIndex], WORLD_VISUAL_FIELD_SEP)
+            if #fields < 5 then return nil, 81 end
+            local known = tostring(fields[5]) == "1"
+            local glyph = known and HexDecodeText(fields[1]) or " "
+            if glyph == "" then glyph = " " end
+            local cell = {
+                char = glyph,
+                textcolour = tonumber(fields[2]) or MAP_FALLBACK_TEXT,
+                backcolour = tonumber(fields[3]) or MAP_FALLBACK_BACKGROUND,
+                style = tonumber(fields[4]) or 0,
+                known = known
+            }
+            if not known and not (rowIndex == 5 and colIndex == 5 and markerCurrent) then
+                unknown = unknown + 1
+            end
+            rowCells[colIndex] = cell
+        end
+
+        -- The live player marker is an overlay.  Preserve the memorized terrain
+        -- background when it exists, but never mistake a prior center marker for
+        -- static terrain.  The center may be treated as visually complete only
+        -- when the saved marker is tagged to this exact world coordinate.
+        if rowIndex == 5 and playerMarker then
+            local center = rowCells[5]
+            center.char = playerMarker.char or center.char
+            center.textcolour = playerMarker.textcolour or center.textcolour
+            center.style = playerMarker.style or center.style
+            if not center.known then
+                center.backcolour = playerMarker.backcolour or center.backcolour
+            end
+        end
+
+        for colIndex = 1, 9 do
+            local cell = rowCells[colIndex]
+            table.insert(textParts, cell.char)
+            table.insert(styleRuns, {
+                text = cell.char,
+                length = #cell.char,
+                textcolour = cell.textcolour,
+                backcolour = cell.backcolour,
+                style = cell.style
+            })
+        end
+        rows[rowIndex] = {text = table.concat(textParts), styles = styleRuns}
+    end
+
+    return rows, unknown
+end
+
+function TryRenderMemorizedWorldMap()
+    local encoded = AskAutomapperMemoryStyledGrid()
+    if not encoded then return false, false end
+    local rows, unknown = DecodeMemoryStyledGrid(encoded)
+    if not rows then return false, false end
+
+    displayedMapLines = rows
+    displayedRoomName = currentRoomName or "WORLD MAP"
+    if not windowManuallyHidden then RenderMapWindow() end
+    return true, (unknown == 0)
+end
+
+function RequestMissingWorldMemory()
+    -- Normal manual movement should not pay the old 350-450ms debounce tax.
+    -- Only an active multi-step Automapper walk retains the queue-safe delay.
+    if AskAutomapperAutoWalkActive() then
+        ScheduleMapRequest(false)
+    else
+        RequestMap(false)
+    end
+end
+
+function AskAutomapperClassification(roomName, exitText)
+    if PluginSupports(AUTOMAPPER_PLUGIN_ID, "ClassifyRoomForWorldMap") ~= error_code.eOK then
+        return "PROBE"
+    end
+    local rc, value = CallPlugin(
+        AUTOMAPPER_PLUGIN_ID,
+        "ClassifyRoomForWorldMap",
+        tostring(roomName or ""),
+        tostring(exitText or "")
+    )
+    if rc ~= error_code.eOK or type(value) ~= "string" then return "PROBE" end
+    value = value:upper()
+    if value == "MAPPABLE" or value == "OVERWORLD" then return value end
+    return "PROBE"
+end
+
+
+--------------------------------------------------
+-- ROOM STATE
+--------------------------------------------------
+
+roomGeneration = 0
+
+currentRoomName = "WORLD MAP"
+currentExitText = ""
+
+requestGeneration = nil
+requestRoomName = nil
+requestExitText = nil
+
+-- Rooms conclusively returning "This area has no map." can be classified
+-- immediately on later visits. This prevents rapid local movement from being
+-- serialized behind a fresh map probe every single time.
+localMappableCache = {}
+
+function RoomClassificationKey(roomName, exitText)
+    return tostring(roomName or ""):lower() .. "\t" .. tostring(exitText or ""):lower()
+end
+
+function CacheLocalMappable(roomName, exitText)
+    localMappableCache[RoomClassificationKey(roomName, exitText)] = true
+end
+
+function IsCachedLocalMappable(roomName, exitText)
+    return localMappableCache[RoomClassificationKey(roomName, exitText)] == true
+end
+
+displayedRoomName = "WORLD MAP"
+
+
+--------------------------------------------------
+-- REQUEST STATE
+--------------------------------------------------
+
+mode = "idle"
+
+requestStartTime = 0
+
+captureLastRowTime = 0
+
+refreshNeeded = false
+
+-- Active/queued map requests can be presentation-only. These refresh the
+-- literal 9x9 map after known overworld movement without re-running
+-- automapper localization or publishing a new authoritative grid serial.
+requestVisualOnly = false
+queuedVisualOnly = false
+
+-- A room header requests classification/presentation, but the actual MUD "map"
+-- command is delayed until room headers have been quiet for a short interval.
+-- Each new room replaces the deferred request, so a 20-room speedwalk results in
+-- at most one probe/refresh for the final room.
+deferredMapPending = false
+deferredMapVisualOnly = false
+deferredMapGeneration = nil
+deferredMapNotBefore = 0
+
+
+--------------------------------------------------
+-- MAP DATA
+--------------------------------------------------
+
+mapLines = {}
+
+displayedMapLines = {}
+
+
+--------------------------------------------------
+-- COPY STYLE RUNS
+--------------------------------------------------
+
+function CopyStyles(styles)
+
+    local copied = {}
+
+
+    if type(styles) ~= "table" then
+        return copied
+    end
+
+
+    for _, styleRun in ipairs(styles) do
+
+        table.insert(
+            copied,
+            {
+                text =
+                    styleRun.text or "",
+
+                length =
+                    styleRun.length or
+                    #(styleRun.text or ""),
+
+                textcolour =
+                    styleRun.textcolour or
+                    MAP_FALLBACK_TEXT,
+
+                backcolour =
+                    styleRun.backcolour or
+                    MAP_FALLBACK_BACKGROUND,
+
+                style =
+                    styleRun.style or 0
+            }
+        )
+
+    end
+
+
+    return copied
+
+end
+
+
+function CopyMapRow(row)
+
+    return {
+        text = row.text,
+
+        styles =
+            CopyStyles(
+                row.styles
+            )
+    }
+
+end
+
+
+--------------------------------------------------
+-- TRIGGER CONTROL
+--------------------------------------------------
+
+function EnableAutomaticResponseTriggers()
+
+    EnableTrigger(
+        "WorldMap_MapHeader",
+        true
+    )
+
+
+    EnableTrigger(
+        "WorldMap_NoMap",
+        true
+    )
+
+
+    EnableTrigger(
+        "WorldMap_SuppressMapRows",
+        true
+    )
+
+end
+
+
+function DisableAutomaticResponseTriggers()
+
+    EnableTrigger(
+        "WorldMap_MapHeader",
+        false
+    )
+
+
+    EnableTrigger(
+        "WorldMap_NoMap",
+        false
+    )
+
+
+    EnableTrigger(
+        "WorldMap_SuppressMapRows",
+        false
+    )
+
+end
+
+
+function EnableMapCapture()
+
+    EnableTrigger(
+        "WorldMap_CaptureRow",
+        true
+    )
+
+end
+
+
+function DisableMapCapture()
+
+    EnableTrigger(
+        "WorldMap_CaptureRow",
+        false
+    )
+
+end
+
+
+function DisableAllMapTriggers()
+
+    DisableMapCapture()
+
+    DisableAutomaticResponseTriggers()
+
+end
+
+
+--------------------------------------------------
+-- REQUEST CANCELLATION / STATE RESET
+--------------------------------------------------
+
+function CancelAutomaticMapRequest()
+
+    DisableAllMapTriggers()
+    CancelDeferredMapRequest()
+
+    mapLines = {}
+    requestGeneration = nil
+    requestRoomName = nil
+    requestExitText = nil
+    requestStartTime = 0
+    captureLastRowTime = 0
+    refreshNeeded = false
+    requestVisualOnly = false
+    queuedVisualOnly = false
+    CancelDeferredMapRequest()
+    mode = "idle"
+
+end
+
+
+--------------------------------------------------
+-- MAP AVAILABILITY RULES
+--------------------------------------------------
+
+function IsMapBlockedRoom()
+
+    return
+        currentRoomName ==
+        "The Center of Elsendor"
+end
+
+
+--------------------------------------------------
+-- DEFERRED / SPEEDWALK-SAFE MAP REQUESTS
+--------------------------------------------------
+
+function CancelDeferredMapRequest()
+    deferredMapPending = false
+    deferredMapVisualOnly = false
+    deferredMapGeneration = nil
+    deferredMapNotBefore = 0
+end
+
+function ScheduleMapRequest(visualOnly)
+    visualOnly = visualOnly == true
+
+    if IsMapBlockedRoom() then
+        CancelDeferredMapRequest()
+        return
+    end
+
+    -- The newest room always owns the request.  This is deliberately replacement,
+    -- not a queue: during a speedwalk only the final room should ever be probed.
+    deferredMapPending = true
+    deferredMapVisualOnly = visualOnly
+    deferredMapGeneration = roomGeneration
+    deferredMapNotBefore = os.clock() + MAP_REQUEST_SETTLE_TIME
+end
+
+function FlushDeferredMapRequest()
+    if not deferredMapPending then return end
+
+    -- A newer room header superseded this request.
+    if deferredMapGeneration ~= roomGeneration then
+        CancelDeferredMapRequest()
+        return
+    end
+
+    if os.clock() < deferredMapNotBefore then return end
+    if mode ~= "idle" then return end
+
+    local visualOnly = deferredMapVisualOnly
+    CancelDeferredMapRequest()
+    RequestMap(visualOnly)
+end
+
+
+--------------------------------------------------
+-- REQUEST MAP
+--------------------------------------------------
+
+function RequestMap(visualOnly)
+
+    visualOnly = visualOnly == true
+
+    if IsMapBlockedRoom() then
+        refreshNeeded = false
+        queuedVisualOnly = false
+        return
+    end
+
+    if mode ~= "idle" then
+        -- Classification is stronger than presentation. The first queued
+        -- request records its own purpose; subsequent queued requests combine
+        -- conservatively so any authoritative request keeps the queue authoritative.
+        if not refreshNeeded then
+            queuedVisualOnly = visualOnly
+        else
+            queuedVisualOnly = queuedVisualOnly and visualOnly
+        end
+        refreshNeeded = true
+        return
+    end
+
+    mapLines = {}
+    requestGeneration = roomGeneration
+    requestRoomName = currentRoomName
+    requestExitText = currentExitText
+    requestVisualOnly = visualOnly
+    refreshNeeded = false
+    queuedVisualOnly = false
+    mode = "waitingForHeader"
+    requestStartTime = os.clock()
+    EnableAutomaticResponseTriggers()
+    Send("map")
+
+end
+
+--------------------------------------------------
+-- ROOM HEADER
+--------------------------------------------------
+
+function OnRoomHeader(
+    name,
+    line,
+    wildcards,
+    styles
+)
+
+    local previousState = currentMapState
+
+    -- Any not-yet-sent request belonged to the previous room.  A speedwalk can
+    -- replace this several times before the quiet-period timer ever fires.
+    CancelDeferredMapRequest()
+
+    roomGeneration = roomGeneration + 1
+    currentRoomName = wildcards[1] or "WORLD MAP"
+    currentExitText = wildcards[2] or ""
+    currentMapState = "UNKNOWN"
+
+    -- The Center cannot be safely probed with map.  It is the bootstrap local
+    -- anchor; this remains the only explicit room exception.
+    if IsMapBlockedRoom() then
+        -- This room is definitively local.  Kill any map request inherited
+        -- from the room we just left so it cannot classify a later arrival.
+        CancelAutomaticMapRequest()
+        CacheLocalMappable(currentRoomName, currentExitText)
+        displayedMapLines = {}
+        WindowShow(Win, false)
+        Redraw()
+        BroadcastMapState("MAPPABLE", currentRoomName)
+        return
+    end
+
+    -- Ask the navigation mapper BEFORE consulting the local no-map cache.
+    -- A room-name/exit fingerprint is not globally unique: an overworld location
+    -- can legitimately resemble a local room.  In older builds the cache could
+    -- therefore flip presentation back to the schematic mapper while walking
+    -- across the overworld.
+    local learned = AskAutomapperClassification(currentRoomName, currentExitText)
+
+    if learned == "MAPPABLE" then
+        -- Learned topology is authoritative here.  Do not leave an older
+        -- asynchronous map request alive behind this room transition.
+        CancelAutomaticMapRequest()
+        CacheLocalMappable(currentRoomName, currentExitText)
+        displayedMapLines = {}
+        WindowShow(Win, false)
+        Redraw()
+        BroadcastMapState("MAPPABLE", currentRoomName)
+        return
+    end
+
+    if learned == "OVERWORLD" then
+        -- Commit the Automapper's already-known world transition immediately.
+        -- BroadcastPlugin is synchronous, so when this returns the mapper's
+        -- current world coordinates have advanced to this room.
+        if mode ~= "idle" then
+            CancelAutomaticMapRequest()
+        end
+        BroadcastMapState("OVERWORLD", currentRoomName)
+
+        -- First try the persistent cell memory.  Previously-seen terrain appears
+        -- immediately with no server command at all.  If any of the 81 static
+        -- cells are unknown, keep the best-effort memory frame visible and issue
+        -- one authoritative map request to fill the missing cells.
+        local rendered, complete = TryRenderMemorizedWorldMap()
+        if complete then return end
+        RequestMissingWorldMemory()
+        return
+    end
+
+    -- Reuse a cached no-map result only while we were already in a confirmed
+    -- local area.  Never let this cache pull us off an active overworld session,
+    -- and never trust it after a reload/UNKNOWN state where context is missing.
+    if previousState == "MAPPABLE" and IsCachedLocalMappable(currentRoomName, currentExitText) then
+        CancelAutomaticMapRequest()
+        displayedMapLines = {}
+        WindowShow(Win, false)
+        Redraw()
+        BroadcastMapState("MAPPABLE", currentRoomName)
+        return
+    end
+
+    -- Unknown destination: probe exactly once. If an older request is still in
+    -- flight, let it finish/timeout and then probe the newest room.  While the
+    -- previous state was OVERWORLD the old world-map frame remains visible until
+    -- this authoritative probe resolves the boundary.
+    -- Manual single-step movement probes immediately when live evidence is
+    -- genuinely needed.  Active Automapper walks still use the quiet-period
+    -- scheduler so a burst collapses to the newest room.
+    if AskAutomapperAutoWalkActive() then
+        ScheduleMapRequest(false)
+    else
+        RequestMap(false)
+    end
+end
+
+
+--------------------------------------------------
+-- BEGIN MAP CAPTURE
+--------------------------------------------------
+
+function BeginMapCapture(
+    name,
+    line,
+    wildcards,
+    styles
+)
+
+    if mode ~= "waitingForHeader" then
+        return
+    end
+
+
+    mapLines = {}
+
+
+    mode =
+        "collectingMap"
+
+
+    captureLastRowTime =
+        os.clock()
+
+
+    EnableMapCapture()
+
+end
+
+
+--------------------------------------------------
+-- CAPTURE MAP ROW
+--------------------------------------------------
+
+function CaptureMapRow(
+    name,
+    line,
+    wildcards,
+    styles
+)
+
+    if mode ~= "collectingMap" then
+        return
+    end
+
+
+    if #line ~= MAP_COLUMNS then
+        return
+    end
+
+
+    local capturedRow = {
+
+        text = line,
+
+        styles =
+            CopyStyles(
+                styles
+            )
+    }
+
+
+    if #capturedRow.styles == 0 then
+
+        capturedRow.styles = {
+
+            {
+                text = line,
+
+                length = #line,
+
+                textcolour =
+                    MAP_FALLBACK_TEXT,
+
+                backcolour =
+                    MAP_FALLBACK_BACKGROUND,
+
+                style = 0
+            }
+
+        }
+
+    end
+
+
+    table.insert(
+        mapLines,
+        capturedRow
+    )
+
+
+    captureLastRowTime =
+        os.clock()
+
+
+    if #mapLines >= MAP_ROWS then
+
+        FinishMapCapture()
+
+    end
+
+end
+
+
+--------------------------------------------------
+-- FINISH MAP CAPTURE
+--------------------------------------------------
+
+function FinishMapCapture()
+
+    if mode ~= "collectingMap" then
+        return
+    end
+
+
+    DisableAllMapTriggers()
+
+
+    local stillCurrent =
+        requestGeneration ==
+        roomGeneration
+
+
+    if stillCurrent then
+
+        displayedMapLines = {}
+
+
+        for _, row in ipairs(mapLines) do
+
+            table.insert(
+                displayedMapLines,
+                CopyMapRow(row)
+            )
+
+        end
+
+
+        --------------------------------------------------
+        -- Use the name belonging to THIS map request.
+        --------------------------------------------------
+
+        displayedRoomName =
+            requestRoomName or
+            currentRoomName or
+            "WORLD MAP"
+
+        CapturePlayerMarkerFromDisplayedGrid()
+
+        if not requestVisualOnly then
+            gridCaptureSerial = (gridCaptureSerial or 0) + 1
+
+            BroadcastMapState(
+                "OVERWORLD",
+                displayedRoomName
+            )
+            TagPlayerMarkerToCurrentWorldCell()
+        end
+
+
+        RenderMapWindow()
+
+    end
+
+
+    mapLines = {}
+
+
+    requestGeneration = nil
+    requestRoomName = nil
+    requestExitText = nil
+    requestVisualOnly = false
+
+    mode = "idle"
+
+    if refreshNeeded then
+        local visualOnly = queuedVisualOnly
+        refreshNeeded = false
+        queuedVisualOnly = false
+        ScheduleMapRequest(visualOnly)
+    end
+
+end
+
+
+--------------------------------------------------
+-- NO MAP
+--------------------------------------------------
+
+function OnNoMap(
+    name,
+    line,
+    wildcards,
+    styles
+)
+
+    if mode ~= "waitingForHeader" then
+        return
+    end
+
+
+    DisableAllMapTriggers()
+
+
+    local stillCurrent =
+        requestGeneration ==
+        roomGeneration
+
+
+    -- Only an authoritative probe may teach us that a room is local. A
+    -- presentation-only refresh must never poison learned overworld state.
+    if not requestVisualOnly and requestRoomName then
+        CacheLocalMappable(requestRoomName, requestExitText or "")
+    end
+
+
+    if stillCurrent and not requestVisualOnly then
+
+        displayedMapLines = {}
+
+
+        BroadcastMapState(
+            "MAPPABLE",
+            currentRoomName
+        )
+
+
+        WindowShow(
+            Win,
+            false
+        )
+
+
+        Redraw()
+
+    end
+
+
+    mapLines = {}
+
+
+    requestGeneration = nil
+    requestRoomName = nil
+    requestExitText = nil
+    requestVisualOnly = false
+
+    mode = "idle"
+
+    if refreshNeeded then
+        local visualOnly = queuedVisualOnly
+        refreshNeeded = false
+        queuedVisualOnly = false
+        ScheduleMapRequest(visualOnly)
+    end
+
+end
+
+
+--------------------------------------------------
+-- ABORT
+--------------------------------------------------
+
+function AbortAutomaticMap()
+
+    DisableAllMapTriggers()
+
+
+    mapLines = {}
+
+
+    requestGeneration = nil
+    requestRoomName = nil
+    requestExitText = nil
+    requestVisualOnly = false
+
+    mode = "idle"
+
+    if refreshNeeded then
+        local visualOnly = queuedVisualOnly
+        refreshNeeded = false
+        queuedVisualOnly = false
+        ScheduleMapRequest(visualOnly)
+    end
+
+end
+
+
+--------------------------------------------------
+-- TIMEOUT
+--------------------------------------------------
+
+function PollMapTimeout()
+
+    -- Service speedwalk-debounced requests here.  Timer cadence is 0.10 s, so
+    -- a 0.35 s quiet period normally fires within roughly 0.35-0.45 s.
+    FlushDeferredMapRequest()
+
+    if mode == "waitingForHeader" then
+
+        if os.clock() -
+           requestStartTime >=
+           MAP_HEADER_TIMEOUT
+        then
+
+            AbortAutomaticMap()
+
+        end
+
+
+    elseif mode == "collectingMap" then
+
+        if os.clock() -
+           captureLastRowTime >=
+           MAP_CAPTURE_TIMEOUT
+        then
+
+            AbortAutomaticMap()
+
+        end
+
+    end
+
+end
+
+
+--------------------------------------------------
+-- BUILD STYLE CELLS
+--------------------------------------------------
+
+function BuildStyleCells(row)
+
+    local cells = {}
+
+    local column = 1
+
+
+    for _, styleRun in ipairs(
+        row.styles or {}
+    ) do
+
+        local runText =
+            styleRun.text or ""
+
+
+        for i = 1, #runText do
+
+            if column > MAP_COLUMNS then
+                break
+            end
+
+
+            cells[column] = {
+
+                char =
+                    runText:sub(
+                        i,
+                        i
+                    ),
+
+                textcolour =
+                    styleRun.textcolour or
+                    MAP_FALLBACK_TEXT,
+
+                backcolour =
+                    styleRun.backcolour or
+                    MAP_FALLBACK_BACKGROUND,
+
+                style =
+                    styleRun.style or 0
+            }
+
+
+            column =
+                column + 1
+
+        end
+
+
+        if column > MAP_COLUMNS then
+            break
+        end
+
+    end
+
+
+    while column <= MAP_COLUMNS do
+
+        local ch =
+            row.text:sub(
+                column,
+                column
+            )
+
+
+        if ch == "" then
+            ch = " "
+        end
+
+
+        cells[column] = {
+
+            char = ch,
+
+            textcolour =
+                MAP_FALLBACK_TEXT,
+
+            backcolour =
+                MAP_FALLBACK_BACKGROUND,
+
+            style = 0
+        }
+
+
+        column =
+            column + 1
+
+    end
+
+
+    return cells
+
+end
+
+
+--------------------------------------------------
+-- DRAW MAP ROW
+--------------------------------------------------
+
+function DrawStyledMapRow(
+    row,
+    startX,
+    y,
+    charWidth
+)
+
+    local cells =
+        BuildStyleCells(row)
+
+
+    for column = 1, MAP_COLUMNS do
+
+        local cell =
+            cells[column]
+
+
+        local x =
+            startX +
+            (
+                (column - 1) *
+                charWidth
+            )
+
+
+        --------------------------------------------------
+        -- Original MUD background
+        --------------------------------------------------
+
+        WindowRectOp(
+            Win,
+            miniwin.rect_fill,
+            x,
+            y,
+            x + charWidth,
+            y + MAP_LINE_HEIGHT,
+            cell.backcolour
+        )
+
+
+        local isBold =
+            (
+                cell.style %
+                2
+            ) == 1
+
+
+        local fontId =
+            isBold
+            and "mapbold"..Win
+            or "map"..Win
+
+
+        if cell.char ~= " " then
+
+            WindowText(
+                Win,
+                fontId,
+                cell.char,
+                x,
+                y,
+                x + charWidth + 2,
+                y + MAP_LINE_HEIGHT,
+                cell.textcolour,
+                false
+            )
+
+        end
+
+    end
+
+end
+
+
+--------------------------------------------------
+-- CALCULATE COMPACT WINDOW SIZE
+--------------------------------------------------
+
+function GetCompactDimensions()
+
+    -- The user's chosen size is authoritative once the window has been resized.
+    -- On first run, calculate the same compact natural size as before.
+    if WINDOW_WIDTH and WINDOW_HEIGHT then
+        FitMapFontForDimensions(WINDOW_WIDTH, WINDOW_HEIGHT)
+    else
+        WindowFont(Win, "map"..Win, FONT_NAME, MAP_FONT_SIZE, false)
+        WindowFont(Win, "mapbold"..Win, FONT_NAME, MAP_FONT_SIZE, true)
+        MAP_LINE_HEIGHT = MAP_FONT_SIZE + 3
+    end
+
+    local charWidth = WindowTextWidth(Win, "map"..Win, "M")
+    local mapPixelWidth = charWidth * MAP_COLUMNS
+
+    local naturalWidth =
+        math.floor(
+            (mapPixelWidth + SIDE_PADDING * 2) *
+            WINDOW_WIDTH_MULTIPLIER
+        )
+
+    local naturalHeight =
+        TITLE_HEIGHT +
+        TOP_PADDING +
+        MAP_ROWS * MAP_LINE_HEIGHT +
+        BOTTOM_PADDING
+
+    if not WINDOW_WIDTH then WINDOW_WIDTH = naturalWidth end
+    if not WINDOW_HEIGHT then WINDOW_HEIGHT = naturalHeight end
+
+    WINDOW_WIDTH = math.max(MIN_WINDOW_WIDTH, math.floor(WINDOW_WIDTH))
+    WINDOW_HEIGHT = math.max(MIN_WINDOW_HEIGHT, math.floor(WINDOW_HEIGHT))
+
+    FitMapFontForDimensions(WINDOW_WIDTH, WINDOW_HEIGHT)
+
+    charWidth = WindowTextWidth(Win, "map"..Win, "M")
+    mapPixelWidth = charWidth * MAP_COLUMNS
+
+    return WINDOW_WIDTH, WINDOW_HEIGHT, charWidth, mapPixelWidth
+end
+
+
+--------------------------------------------------
+-- FIT TITLE FONT TO FIXED WINDOW WIDTH
+--------------------------------------------------
+
+function FitTitleText(
+    roomName,
+    windowWidth
+)
+
+    roomName =
+        roomName or
+        "WORLD MAP"
+
+    local availableWidth =
+        windowWidth -
+        (
+            TITLE_SIDE_PADDING *
+            2
+        )
+
+
+    --------------------------------------------------
+    -- Keep the COMPLETE room name.
+    --
+    -- Start at the normal title size and progressively
+    -- shrink until the full title fits inside the fixed
+    -- window width.
+    --------------------------------------------------
+
+    for size =
+        TITLE_FONT_MAX_SIZE,
+        TITLE_FONT_MIN_SIZE,
+        -1
+    do
+
+        WindowFont(
+            Win,
+            "title"..Win,
+            FONT_NAME,
+            size,
+            true
+        )
+
+
+        local width =
+            WindowTextWidth(
+                Win,
+                "title"..Win,
+                roomName
+            )
+
+
+        if width <=
+           availableWidth
+        then
+
+            return
+                roomName,
+                width
+        end
+
+    end
+
+
+    --------------------------------------------------
+    -- Very long edge case:
+    --
+    -- Continue shrinking below the normal minimum rather
+    -- than truncating the room name.  This preserves the
+    -- complete title at all times.
+    --------------------------------------------------
+
+    for size =
+        TITLE_FONT_MIN_SIZE - 1,
+        2,
+        -1
+    do
+
+        WindowFont(
+            Win,
+            "title"..Win,
+            FONT_NAME,
+            size,
+            true
+        )
+
+
+        local width =
+            WindowTextWidth(
+                Win,
+                "title"..Win,
+                roomName
+            )
+
+
+        if width <=
+           availableWidth
+        then
+
+            return
+                roomName,
+                width
+        end
+
+    end
+
+
+    --------------------------------------------------
+    -- Absolute fallback:
+    -- use size 2 and draw the complete title.  This should
+    -- only occur for extraordinarily long room names.
+    --------------------------------------------------
+
+    WindowFont(
+        Win,
+        "title"..Win,
+        FONT_NAME,
+        2,
+        true
+    )
+
+
+    return
+        roomName,
+        WindowTextWidth(
+            Win,
+            "title"..Win,
+            roomName
+        )
+
+end
+
+--------------------------------------------------
+-- RENDER
+--------------------------------------------------
+
+function SyncMapWindowPosition()
+    if not windowinfo then return end
+
+    -- Never let the hidden 100x100 install placeholder overwrite a restored
+    -- layout position.  On some MUSHclient builds WindowInfo() reports 0,0 for
+    -- that hidden placeholder even after WindowPosition()/movewindow state has
+    -- been updated.  The saved/restored windowinfo coordinates remain the
+    -- authority until RenderMapWindow creates the first real map window.
+    if managedLayoutPositionPending then return end
+
+    local left, top = WindowInfo(Win, 1), WindowInfo(Win, 2)
+    if left ~= nil and top ~= nil then
+        windowinfo.window_left = left
+        windowinfo.window_top = top
+        windowinfo.window_mode = WindowInfo(Win, 7) or windowinfo.window_mode
+        windowinfo.window_flags = WindowInfo(Win, 8) or windowinfo.window_flags
+    end
+end
+
+function MapDragReleased()
+    check(SaveState())
+    return false -- allow movewindow's normal repaint
+end
+
+function RenderMapWindow()
+
+    if #displayedMapLines == 0 then
+        return
+    end
+
+
+    if windowManuallyHidden then
+        return
+    end
+
+
+    local windowWidth,
+          windowHeight,
+          charWidth,
+          mapPixelWidth =
+        GetCompactDimensions()
+
+
+    --------------------------------------------------
+    -- Keep the miniwindow surface alive between map updates.  The 9x9 contents
+    -- change every move, but recreating the actual window object every move is
+    -- unnecessary.  Create once; resize only when the user/layout changes size.
+    --------------------------------------------------
+
+    SyncMapWindowPosition()
+
+    if not worldMapSurfaceReady then
+        check(
+            WindowCreate(
+                Win,
+                windowinfo.window_left,
+                windowinfo.window_top,
+                windowWidth,
+                windowHeight,
+                windowinfo.window_mode,
+                windowinfo.window_flags,
+                BACKGROUND_COLOUR
+            )
+        )
+        worldMapSurfaceReady = true
+        worldMapSurfaceWidth = windowWidth
+        worldMapSurfaceHeight = windowHeight
+    elseif worldMapSurfaceWidth ~= windowWidth or worldMapSurfaceHeight ~= windowHeight then
+        check(WindowResize(Win, windowWidth, windowHeight, BACKGROUND_COLOUR))
+        worldMapSurfaceWidth = windowWidth
+        worldMapSurfaceHeight = windowHeight
+    end
+
+    -- The real map window now exists at the authoritative restored position, so
+    -- subsequent renders may safely synchronize from WindowInfo().
+    if managedLayoutPositionPending then
+        WindowPosition(
+            Win,
+            windowinfo.window_left,
+            windowinfo.window_top,
+            windowinfo.window_mode,
+            windowinfo.window_flags
+        )
+        managedLayoutPositionPending = false
+        if movewindow then movewindow.save_state(Win) end
+    end
+
+
+    --------------------------------------------------
+    -- BACKGROUND
+    --------------------------------------------------
+
+    WindowRectOp(
+        Win,
+        miniwin.rect_fill,
+        0,
+        0,
+        windowWidth,
+        windowHeight,
+        BACKGROUND_COLOUR
+    )
+
+
+    --------------------------------------------------
+    -- TITLE BAR
+    --------------------------------------------------
+
+    WindowRectOp(
+        Win,
+        miniwin.rect_fill,
+        0,
+        0,
+        windowWidth,
+        TITLE_HEIGHT,
+        TITLE_BAR_COLOUR
+    )
+
+
+    WindowLine(
+        Win,
+        0,
+        TITLE_HEIGHT - 1,
+        windowWidth,
+        TITLE_HEIGHT - 1,
+        BORDER_COLOUR,
+        miniwin.pen_solid,
+        1
+    )
+
+
+    --------------------------------------------------
+    -- ROOM NAME TITLE
+    --------------------------------------------------
+
+    local titleText,
+          titleWidth =
+        FitTitleText(
+            displayedRoomName,
+            windowWidth
+        )
+
+
+    local titleX =
+        math.floor(
+            (
+                windowWidth -
+                titleWidth
+            ) /
+            2
+        )
+
+
+    titleX =
+        math.max(
+            TITLE_SIDE_PADDING,
+            titleX
+        )
+
+
+    WindowText(
+        Win,
+        "title"..Win,
+        titleText,
+        titleX,
+        3,
+        windowWidth -
+        TITLE_SIDE_PADDING,
+        TITLE_HEIGHT,
+        TITLE_COLOUR,
+        false
+    )
+
+
+    --------------------------------------------------
+    -- CENTER MAP
+    --------------------------------------------------
+
+    local mapLeft =
+        math.floor(
+            (
+                windowWidth -
+                mapPixelWidth
+            ) /
+            2
+        )
+
+
+    local y =
+        TITLE_HEIGHT +
+        TOP_PADDING
+
+
+    for _, row in ipairs(
+        displayedMapLines
+    ) do
+
+        DrawStyledMapRow(
+            row,
+            mapLeft,
+            y,
+            charWidth
+        )
+
+
+        y =
+            y +
+            MAP_LINE_HEIGHT
+
+    end
+
+
+    --------------------------------------------------
+    -- BORDER
+    --------------------------------------------------
+
+    WindowRectOp(
+        Win,
+        miniwin.rect_frame,
+        0,
+        0,
+        windowWidth,
+        windowHeight,
+        BORDER_COLOUR
+    )
+
+
+    --------------------------------------------------
+    -- DRAG TITLE BAR
+    --------------------------------------------------
+
+    movewindow.add_drag_handler(
+        Win,
+        0,
+        0,
+        0,
+        TITLE_HEIGHT
+    )
+
+    InstallWorldMapResizeHandle()
+
+    WindowShow(
+        Win,
+        true
+    )
+
+
+    Redraw()
+
+end
+
+
+--------------------------------------------------
+-- SHOW
+--------------------------------------------------
+
+function mapwin_show(
+    name,
+    line,
+    wildcards
+)
+
+    windowManuallyHidden = false
+
+
+    if #displayedMapLines > 0 then
+
+        RenderMapWindow()
+
+    end
+
+
+    ColourNote(
+        "yellow",
+        "",
+        "World map window enabled."
+    )
+
+end
+
+
+--------------------------------------------------
+-- FORCE LIVE REFRESH
+--------------------------------------------------
+
+function mapwin_refresh(name, line, wildcards)
+    CancelAutomaticMapRequest()
+    RequestMap(false)
+    ColourNote("yellow", "", "World map live refresh requested.")
+end
+
+
+--------------------------------------------------
+-- HIDE
+--------------------------------------------------
+
+function mapwin_hide(
+    name,
+    line,
+    wildcards
+)
+
+    windowManuallyHidden = true
+
+
+    WindowShow(
+        Win,
+        false
+    )
+
+
+    Redraw()
+
+
+    ColourNote(
+        "yellow",
+        "",
+        "World map window hidden."
+    )
+
+end
+
+
+--------------------------------------------------
+-- INSTALL
+--------------------------------------------------
+
+function OnPluginInstall()
+
+    LoadTheme()
+    LoadPlayerMarker()
+
+    DisableAllMapTriggers()
+
+
+    mode = "idle"
+
+    refreshNeeded = false
+    requestVisualOnly = false
+    queuedVisualOnly = false
+
+    requestGeneration = nil
+    requestRoomName = nil
+
+
+    windowinfo =
+        movewindow.install(
+            Win,
+            miniwin.pos_top_left,
+            miniwin.create_absolute_location,
+            true,
+            nil,
+            {dragrelease = MapDragReleased}
+        )
+
+    -- movewindow has now restored the requested location.  Do not replace it
+    -- with coordinates read from the hidden placeholder before the real map is
+    -- rendered for the first time.
+    managedLayoutPositionPending = true
+
+
+    --------------------------------------------------
+    -- Create tiny placeholder first so fonts can be
+    -- installed and measured.
+    --------------------------------------------------
+
+    check(
+        WindowCreate(
+            Win,
+            windowinfo.window_left,
+            windowinfo.window_top,
+            100,
+            100,
+            windowinfo.window_mode,
+            windowinfo.window_flags,
+            BACKGROUND_COLOUR
+        )
+    )
+
+    worldMapSurfaceReady = false
+    worldMapSurfaceWidth = 100
+    worldMapSurfaceHeight = 100
+
+
+    --------------------------------------------------
+    -- MAP FONT
+    --------------------------------------------------
+
+    check(
+        WindowFont(
+            Win,
+            "map"..Win,
+            FONT_NAME,
+            MAP_FONT_SIZE,
+            false
+        )
+    )
+
+
+    --------------------------------------------------
+    -- BOLD MAP FONT
+    --------------------------------------------------
+
+    check(
+        WindowFont(
+            Win,
+            "mapbold"..Win,
+            FONT_NAME,
+            MAP_FONT_SIZE,
+            true
+        )
+    )
+
+
+    --------------------------------------------------
+    -- SMALL TITLE FONT
+    --------------------------------------------------
+
+    check(
+        WindowFont(
+            Win,
+            "title"..Win,
+            FONT_NAME,
+            TITLE_FONT_MAX_SIZE,
+            true
+        )
+    )
+
+
+    movewindow.add_drag_handler(
+        Win,
+        0,
+        0,
+        0,
+        TITLE_HEIGHT
+    )
+
+
+    WindowShow(
+        Win,
+        false
+    )
+
+end
+
+
+--------------------------------------------------
+-- SAVE STATE
+--------------------------------------------------
+
+function OnPluginSaveState()
+
+    SaveWorldMapWindowSize()
+
+    if not windowinfo then return end
+    SyncMapWindowPosition()
+    local prefix = "mw_" .. Win
+    SetVariable(prefix .. "_windowx", windowinfo.window_left)
+    SetVariable(prefix .. "_windowy", windowinfo.window_top)
+    SetVariable(prefix .. "_windowmode", windowinfo.window_mode)
+    SetVariable(prefix .. "_windowflags", windowinfo.window_flags)
+
+end
+
+
+--------------------------------------------------
+-- ENABLE
+--------------------------------------------------
+
+function OnPluginEnable()
+
+    LoadTheme()
+
+    DisableAllMapTriggers()
+
+
+    mode = "idle"
+
+    refreshNeeded = false
+    requestVisualOnly = false
+    queuedVisualOnly = false
+
+    requestGeneration = nil
+    requestRoomName = nil
+
+
+    if #displayedMapLines > 0
+        and
+       not windowManuallyHidden
+    then
+
+        RenderMapWindow()
+
+    end
+
+end
+
+
+--------------------------------------------------
+-- DISABLE
+--------------------------------------------------
+
+function OnPluginDisable()
+
+    DisableAllMapTriggers()
+
+
+    mode = "idle"
+
+    refreshNeeded = false
+
+
+    WindowShow(
+        Win,
+        false
+    )
+
+
+    Redraw()
+
+end
+
+
+
+--------------------------------------------------
+-- THEME BROADCAST
+--------------------------------------------------
+
+function OnPluginBroadcast(
+    msg,
+    id,
+    name,
+    text
+)
+
+    if msg ~= THEME_BROADCAST_MESSAGE then
+        return
+    end
+
+    if id ~= THEME_CONTROLLER_ID then
+        return
+    end
+
+    LoadTheme()
+
+    --------------------------------------------------
+    -- Redraw only the window chrome.  DrawStyledMapRow
+    -- still uses the original captured MUD colours.
+    --------------------------------------------------
+
+    if #displayedMapLines > 0
+        and
+       not windowManuallyHidden
+        and
+       not IsMapBlockedRoom()
+    then
+
+        RenderMapWindow()
+    end
+end
+
+
+--------------------------------------------------
+-- CLOSE
+--------------------------------------------------
+
+function OnPluginClose()
+
+    DisableAllMapTriggers()
+
+
+    WindowShow(
+        Win,
+        false
+    )
+
+
+    Redraw()
+
+end
+
+
+
+--------------------------------------------------
+-- PLUGIN CONTROLLER LAYOUT API
+--------------------------------------------------
+
+function ManagedLayoutParse(spec)
+    local windowName, sx, sy, sw, sh =
+        tostring(spec or ""):match("^([^\t]+)\t(-?%d+)\t(-?%d+)\t(%d+)\t(%d+)$")
+    if not windowName then return nil end
+    return windowName, tonumber(sx), tonumber(sy), tonumber(sw), tonumber(sh)
+end
+
+function ManagedLayoutSetMoveWindowInfo(info, winName, x, y)
+    if type(info) ~= "table" then return end
+    info.window_left = x
+    info.window_top = y
+    info.window_mode = tonumber(WindowInfo(winName, 7)) or info.window_mode or miniwin.pos_top_left
+    info.window_flags = tonumber(WindowInfo(winName, 8)) or info.window_flags or miniwin.create_absolute_location
+end
+
+function GetManagedLayoutWindows()
+    return Win
+end
+
+function ApplyManagedLayout(spec)
+    local windowName, x, y, w, h = ManagedLayoutParse(spec)
+    if windowName ~= Win then return "wrong window" end
+    if type(windowinfo) ~= "table" then return "window not ready" end
+
+    WINDOW_WIDTH = math.max(MIN_WINDOW_WIDTH, math.floor(w))
+    WINDOW_HEIGHT = math.max(MIN_WINDOW_HEIGHT, math.floor(h))
+    SaveWorldMapWindowSize()
+
+    WindowResize(
+        Win,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        BACKGROUND_COLOUR
+    )
+
+    ManagedLayoutSetMoveWindowInfo(windowinfo, Win, x, y)
+    managedLayoutPositionPending = true
+
+    if #displayedMapLines > 0 and not windowManuallyHidden then
+        RenderMapWindow()
+    else
+        WindowResize(Win, WINDOW_WIDTH, WINDOW_HEIGHT, BACKGROUND_COLOUR)
+        InstallWorldMapResizeHandle()
+    end
+
+    WindowPosition(
+        Win,
+        x,
+        y,
+        windowinfo.window_mode,
+        windowinfo.window_flags
+    )
+
+    if movewindow then movewindow.save_state(Win) end
+    pcall(SaveState)
+    Redraw()
+    return "ok"
+end
+
+]]>
+</script>
+
+</muclient>

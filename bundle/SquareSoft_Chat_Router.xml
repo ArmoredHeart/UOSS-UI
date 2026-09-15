@@ -1,0 +1,232 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+
+<muclient>
+<plugin
+    name="SquareSoft_Chat_Router"
+    author="OpenAI"
+    id="e4b8d2a16c3f4079b5a821dc"
+    language="Lua"
+    purpose="Portable SquareSoft chat/tell capture rules for Generic_Chat_Miniwindow"
+    date_written="2026-09-14"
+    requires="4.73"
+    version="1.1"
+    save_state="y"
+>
+<description trim="y">
+<![CDATA[
+SQUARESOFT CHAT ROUTER v1.1
+
+Owns the chat-routing triggers that Generic_Chat_Miniwindow intentionally does
+not define itself. Matching lines are removed from the raw server output and
+forwarded with their original MUD style runs to Generic_Chat_Miniwindow. Routed
+chat is always miniwindow-only: the original server line is omitted and the router
+uses Generic Chat's no-echo API so the catch cannot be duplicated in main output.
+The Generic Chat `chats echo` preference remains available for non-router callers.
+
+Routed families:
+  PartyTell, announce, newbie, gossip, death, auction, PlayerAuction
+  You say, ...
+  You tell NAME: ...
+  NAME tells you: ... / NAME tells you, ...
+
+Commands:
+  chatrouter status
+  chatrouter on
+  chatrouter off
+
+All trigger names are stable and live in group SS_CHAT_ROUTER.
+]]>
+</description>
+</plugin>
+
+<triggers>
+  <trigger
+      name="SS_CHAT_CHANNELS"
+      group="SS_CHAT_ROUTER"
+      script="RouteChat"
+      match="^\[(?:PartyTell|announce|newbie|gossip|death|auction|PlayerAuction)\]\s+.*$"
+      regexp="y"
+      ignore_case="y"
+      enabled="y"
+      keep_evaluating="y"
+      omit_from_output="y"
+      sequence="850"
+  ></trigger>
+
+  <trigger
+      name="SS_CHAT_YOU_SAY"
+      group="SS_CHAT_ROUTER"
+      script="RouteChat"
+      match="^You say,\s+.*$"
+      regexp="y"
+      ignore_case="y"
+      enabled="y"
+      keep_evaluating="y"
+      omit_from_output="y"
+      sequence="850"
+  ></trigger>
+
+  <trigger
+      name="SS_CHAT_YOU_TELL"
+      group="SS_CHAT_ROUTER"
+      script="RouteChat"
+      match="^You tell [^:]+:\s*.*$"
+      regexp="y"
+      ignore_case="y"
+      enabled="y"
+      keep_evaluating="y"
+      omit_from_output="y"
+      sequence="850"
+  ></trigger>
+
+  <trigger
+      name="SS_CHAT_TELLS_YOU"
+      group="SS_CHAT_ROUTER"
+      script="RouteChat"
+      match="^(?!\[)(?!You say,)(?!You tell ).+? tells you(?::|,)\s*.*$"
+      regexp="y"
+      ignore_case="y"
+      enabled="y"
+      keep_evaluating="y"
+      omit_from_output="y"
+      sequence="850"
+  ></trigger>
+</triggers>
+
+<aliases>
+  <alias
+      name="SS_CHAT_ROUTER_STATUS"
+      script="ChatRouterStatusAlias"
+      match="^chatrouter\s+status$"
+      regexp="y"
+      ignore_case="y"
+      enabled="y"
+      sequence="20"
+  ></alias>
+  <alias
+      name="SS_CHAT_ROUTER_ON"
+      script="ChatRouterOnAlias"
+      match="^chatrouter\s+on$"
+      regexp="y"
+      ignore_case="y"
+      enabled="y"
+      sequence="20"
+  ></alias>
+  <alias
+      name="SS_CHAT_ROUTER_OFF"
+      script="ChatRouterOffAlias"
+      match="^chatrouter\s+off$"
+      regexp="y"
+      ignore_case="y"
+      enabled="y"
+      sequence="20"
+  ></alias>
+</aliases>
+
+<script>
+<![CDATA[
+
+require "serialize"
+
+CHAT_PLUGIN_ID = "10778718503f0c91106745f5"
+CHAT_TRIGGER_GROUP = "SS_CHAT_ROUTER"
+routerEnabled = GetVariable("router_enabled") ~= "false"
+
+local function ChatAvailable()
+    return IsPluginInstalled(CHAT_PLUGIN_ID)
+end
+
+local function SetRouterEnabled(enabled)
+    routerEnabled = enabled and true or false
+    SetVariable("router_enabled", routerEnabled and "true" or "false")
+    EnableGroup(CHAT_TRIGGER_GROUP, routerEnabled)
+end
+
+-- Public API used by the suite installer during v1.x -> v2.0 migration.
+function SetPortableEnabled(value)
+    local enabled = (value == true) or tostring(value or ""):lower() == "true" or tostring(value or "") == "1"
+    if enabled and not ChatAvailable() then
+        SetRouterEnabled(false)
+        return "false"
+    end
+    SetRouterEnabled(enabled)
+    return routerEnabled and "true" or "false"
+end
+
+local function EchoStyles(styles, fallbackLine)
+    if type(styles) == "table" and #styles > 0 then
+        for _, style in ipairs(styles) do
+            ColourTell(
+                RGBColourToName(style.textcolour),
+                RGBColourToName(style.backcolour),
+                style.text or ""
+            )
+        end
+        Note("")
+    else
+        Note(fallbackLine or "")
+    end
+end
+
+function RouteChat(name, line, wildcards, styles)
+    if not routerEnabled then return end
+
+    if not ChatAvailable() then
+        -- Fail open: this line was omitted by the trigger, so put it back before
+        -- disabling routing. Chat should never disappear because a dependency did.
+        EchoStyles(styles, line)
+        SetRouterEnabled(false)
+        ColourNote("red", "", "[Chat Router] Generic_Chat_Miniwindow is missing; routing disabled.")
+        ColourNote("yellow", "", "[Chat Router] Reinstall the suite, then type 'chatrouter on'.")
+        return
+    end
+
+    local rc = CallPlugin(
+        CHAT_PLUGIN_ID,
+        "display_noecho",
+        serialize.save_simple(styles or {})
+    )
+
+    if rc ~= error_code.eOK then
+        EchoStyles(styles, line)
+        SetRouterEnabled(false)
+        ColourNote("red", "", "[Chat Router] Could not forward chat (error " .. tostring(rc) .. "); routing disabled.")
+    end
+end
+
+function ChatRouterStatusAlias(name, line, wildcards)
+    ColourNote("lime", "", "[Chat Router] " .. (routerEnabled and "ON" or "OFF"))
+    ColourNote(ChatAvailable() and "gray" or "red", "", "  Generic Chat destination: " .. (ChatAvailable() and "installed" or "MISSING"))
+end
+
+function ChatRouterOnAlias(name, line, wildcards)
+    if not ChatAvailable() then
+        ColourNote("red", "", "[Chat Router] Generic_Chat_Miniwindow is not installed.")
+        return
+    end
+    SetRouterEnabled(true)
+    ColourNote("lime", "", "[Chat Router] enabled.")
+end
+
+function ChatRouterOffAlias(name, line, wildcards)
+    SetRouterEnabled(false)
+    ColourNote("yellow", "", "[Chat Router] disabled.")
+end
+
+function OnPluginInstall()
+    if routerEnabled and not ChatAvailable() then
+        SetRouterEnabled(false)
+        ColourNote("yellow", "", "[Chat Router] Generic Chat is not installed; routing starts disabled.")
+    else
+        EnableGroup(CHAT_TRIGGER_GROUP, routerEnabled)
+    end
+end
+
+function OnPluginEnable()
+    EnableGroup(CHAT_TRIGGER_GROUP, routerEnabled and ChatAvailable())
+end
+
+]]>
+</script>
+</muclient>

@@ -1,0 +1,1839 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+
+<muclient>
+
+<plugin
+   name="XP_Rate_Tracker"
+   author="Claude / modified by ChatGPT"
+   id="a1e4bf29c1a8477fa19b2201"
+   language="Lua"
+   purpose="Resizable XP/AP/Gold rate tracker with live graph"
+   date_written="2026-09-07"
+   version="1.9"
+   save_state="y"
+   >
+
+<description trim="y">
+USAGE:
+
+  rates show
+  rates hide
+  rates reset
+
+  rates hour
+  rates minute
+  rates toggle
+
+Automatically catches lines like:
+
+  You receive 21700 XP, 48 AP, and 1063 gold.
+
+Tracks running totals plus XP/AP/Gold rates.
+
+Graph history covers approximately one hour.
+
+Modular theme client: colours are supplied by UI_Theme_Controller v2.0 when available.
+</description>
+
+</plugin>
+
+
+<triggers>
+
+<trigger
+   script="OnKillLine"
+   match="^You receive ([\d,]+) XP, ([\d,]+) AP, and ([\d,]+) gold\.$"
+   regexp="y"
+   ignore_case="y"
+   enabled="y"
+   sequence="100"
+   >
+</trigger>
+
+</triggers>
+
+
+<aliases>
+
+<alias
+   script="rate_reset"
+   match="^rates reset$"
+   regexp="y"
+   ignore_case="y"
+   enabled="y"
+   sequence="100"
+   >
+</alias>
+
+<alias
+   script="rate_show"
+   match="^rates show$"
+   regexp="y"
+   ignore_case="y"
+   enabled="y"
+   sequence="100"
+   >
+</alias>
+
+<alias
+   script="rate_hide"
+   match="^rates hide$"
+   regexp="y"
+   ignore_case="y"
+   enabled="y"
+   sequence="100"
+   >
+</alias>
+
+<alias
+   script="rate_hour"
+   match="^rates hour$"
+   regexp="y"
+   ignore_case="y"
+   enabled="y"
+   sequence="100"
+   >
+</alias>
+
+<alias
+   script="rate_minute"
+   match="^rates minute$"
+   regexp="y"
+   ignore_case="y"
+   enabled="y"
+   sequence="100"
+   >
+</alias>
+
+<alias
+   script="rate_toggle"
+   match="^rates toggle$"
+   regexp="y"
+   ignore_case="y"
+   enabled="y"
+   sequence="100"
+   >
+</alias>
+
+</aliases>
+
+
+<timers>
+
+<timer
+   name="rate_tick"
+   second="30"
+   enabled="y"
+   script="TickUpdate"
+   >
+</timer>
+
+</timers>
+
+
+<script>
+<![CDATA[
+
+require "movewindow"
+
+Win = GetPluginID()
+
+
+------------------------------------------------------------
+-- WINDOW SIZE
+-- Matches Exit Compass exactly
+------------------------------------------------------------
+
+WINDOW_WIDTH  = 390
+WINDOW_HEIGHT = 215
+
+TITLE_HEIGHT = 24
+
+FONT_NAME = "Lucida Console"
+FONT_SIZE = 9
+
+LINE_HEIGHT = 16
+
+TEXT_INSET = 10
+VALUE_GAP = 18
+
+--------------------------------------------------
+-- RESIZABLE MINIWINDOW
+--------------------------------------------------
+RESIZE_GRIP_SIZE = 14
+MIN_WINDOW_WIDTH = 260
+MIN_WINDOW_HEIGHT = 175
+resizeActive = false
+
+function LoadWindowSize()
+    local w = tonumber(GetVariable("xp_width"))
+    local h = tonumber(GetVariable("xp_height"))
+    if w then WINDOW_WIDTH = math.max(MIN_WINDOW_WIDTH, math.floor(w)) end
+    if h then WINDOW_HEIGHT = math.max(MIN_WINDOW_HEIGHT, math.floor(h)) end
+end
+
+function SaveWindowSize()
+    SetVariable("xp_width", tostring(math.floor(WINDOW_WIDTH)))
+    SetVariable("xp_height", tostring(math.floor(WINDOW_HEIGHT)))
+end
+
+function ResizeMouseDown(flags, hotspot_id) resizeActive = true; return 0 end
+
+function UpdateResizeFromMouse()
+    local mouseX = tonumber(WindowInfo(Win, 17))
+    local mouseY = tonumber(WindowInfo(Win, 18))
+    local left = tonumber(WindowInfo(Win, 10)) or tonumber(WindowInfo(Win, 1)) or 0
+    local top = tonumber(WindowInfo(Win, 11)) or tonumber(WindowInfo(Win, 2)) or 0
+    if not mouseX or not mouseY then return false end
+    local newW = math.max(MIN_WINDOW_WIDTH, math.floor(mouseX - left + 1))
+    local newH = math.max(MIN_WINDOW_HEIGHT, math.floor(mouseY - top + 1))
+    if newW == WINDOW_WIDTH and newH == WINDOW_HEIGHT then return false end
+    WINDOW_WIDTH, WINDOW_HEIGHT = newW, newH
+    WindowResize(Win, WINDOW_WIDTH, WINDOW_HEIGHT, BACKGROUND_COLOUR)
+    Redraw()
+    return true
+end
+
+function ResizeMouseMove(flags, hotspot_id)
+    if resizeActive then UpdateResizeFromMouse() end
+    SetCursor(miniwin.cursor_nw_se_arrow)
+    return 0
+end
+
+function ResizeMouseUp(flags, hotspot_id)
+    if resizeActive then UpdateResizeFromMouse() end
+    resizeActive = false
+    SaveWindowSize()
+    movewindow.add_drag_handler(Win,0,0,0,TITLE_HEIGHT)
+    WindowDeleteHotspot(Win,"rate_reset_button")
+    WindowDeleteHotspot(Win,"rate_toggle_button")
+    WindowAddHotspot(Win,"rate_reset_button",WINDOW_WIDTH-106,TITLE_HEIGHT+6,WINDOW_WIDTH-58,TITLE_HEIGHT+25,"","","","","RateResetClick","Reset rates",miniwin.cursor_hand,0)
+    WindowAddHotspot(Win,"rate_toggle_button",WINDOW_WIDTH-55,TITLE_HEIGHT+6,WINDOW_WIDTH-7,TITLE_HEIGHT+25,"","","","","RateToggleClick","Toggle hourly/minute rates",miniwin.cursor_hand,0)
+    Redraw_Window()
+    return 0
+end
+
+function InstallResizeHandle()
+    WindowDeleteHotspot(Win, "00_resize")
+    local l = math.max(0, WINDOW_WIDTH - RESIZE_GRIP_SIZE)
+    local t = math.max(0, WINDOW_HEIGHT - RESIZE_GRIP_SIZE)
+    WindowAddHotspot(Win, "00_resize", l, t, WINDOW_WIDTH, WINDOW_HEIGHT,
+        "", "", "ResizeMouseDown", "", "", "Drag to resize", miniwin.cursor_nw_se_arrow, 0)
+    WindowDragHandler(Win, "00_resize", "ResizeMouseMove", "ResizeMouseUp", 0)
+    WindowLine(Win, WINDOW_WIDTH-11, WINDOW_HEIGHT-3, WINDOW_WIDTH-3, WINDOW_HEIGHT-11, BORDER_COLOUR, miniwin.pen_solid, 1)
+    WindowLine(Win, WINDOW_WIDTH-7, WINDOW_HEIGHT-3, WINDOW_WIDTH-3, WINDOW_HEIGHT-7, BORDER_COLOUR, miniwin.pen_solid, 1)
+end
+
+
+------------------------------------------------------------
+-- GRAPH SETTINGS
+--
+-- 120 samples x 30 seconds = 60 minutes
+------------------------------------------------------------
+
+GRAPH_MAX_SAMPLES = 120
+
+GRAPH_MARGIN = 10
+GRAPH_HEIGHT = 95
+GRAPH_GAP = 4
+
+
+------------------------------------------------------------
+-- SHARED UI THEMES
+------------------------------------------------------------
+
+THEME_CONTROLLER_ID =
+    "43c8d047be7a418ba5e86916"
+
+THEME_BROADCAST_MESSAGE = 9042
+
+
+
+--------------------------------------------------
+-- MODULAR THEME CLIENT
+--
+-- The controller owns the real palette. The local THEMES table
+-- below is retained only as a safe fallback if the controller
+-- is unavailable.
+--------------------------------------------------
+
+local THEME_PROFILE =
+    "xp"
+
+
+function ThemeColour(
+    role,
+    fallback
+)
+
+    local rc,
+          value =
+        CallPlugin(
+            THEME_CONTROLLER_ID,
+            "GetThemeColour",
+            THEME_PROFILE,
+            role
+        )
+
+
+    if rc ==
+       error_code.eOK and
+       type(
+           value
+       ) ==
+       "string" and
+       value ~=
+       ""
+    then
+
+        return
+            ColourNameToRGB(
+                value
+            )
+
+    end
+
+
+    return
+        ColourNameToRGB(
+            fallback
+        )
+end
+
+
+THEMES = {
+
+    --------------------------------------------------------
+    -- CLASSIC
+    --
+    -- Preserves the original tracker colours exactly.
+    --------------------------------------------------------
+
+    classic = {
+
+        background = "#000000",
+        border = "#808080",
+        title_bar = "darkslategray",
+        title_text = "#FFD700",
+        label = "#D4D0C8",
+
+        xp = "#70FF64",
+        ap = "#64C8FF",
+        gold = "#FFD700",
+
+        graph_border = "#404040",
+        graph_bg = "#0A0A0A",
+        graph_grid = "#202020"
+    },
+
+
+    --------------------------------------------------------
+    -- AMBER TERMINAL
+    --
+    -- Three related amber phosphor intensities keep the
+    -- three graph series distinct without becoming a
+    -- rainbow palette.
+    --------------------------------------------------------
+
+    amber = {
+
+        background = "#050301",
+        border = "#6B3D18",
+        title_bar = "#160B03",
+        title_text = "#FFB347",
+        label = "#C9792A",
+
+        xp = "#FFD18A",
+        ap = "#E9943A",
+        gold = "#FFB347",
+
+        graph_border = "#5A3213",
+        graph_bg = "#080401",
+        graph_grid = "#2D1809"
+    },
+
+
+    --------------------------------------------------------
+    -- DEFAULT / GREEN TERMINAL
+    --------------------------------------------------------
+
+    default = {
+
+        background = "#000500",
+        border = "#285B28",
+        title_bar = "#061306",
+        title_text = "#9AFF82",
+        label = "#62C962",
+
+        xp = "#C2FFAE",
+        ap = "#72DD72",
+        gold = "#9AFF82",
+
+        graph_border = "#1F4B1F",
+        graph_bg = "#000800",
+        graph_grid = "#102A10"
+    }
+
+}
+
+
+------------------------------------------------------------
+-- ACTIVE COLOUR PALETTE
+------------------------------------------------------------
+
+function LoadTheme()
+
+    local theme =
+        GetPluginVariable(
+            THEME_CONTROLLER_ID,
+            "theme"
+        )
+
+    if not THEMES[theme] then
+        theme = "default"
+    end
+
+    local T = THEMES[theme]
+
+    BACKGROUND_COLOUR =
+        ThemeColour("background", T.background)
+
+    BORDER_COLOUR =
+        ThemeColour("border", T.border)
+
+    TITLE_COLOUR =
+        ThemeColour("title_bar", T.title_bar)
+
+    TITLE_TEXT_COLOUR =
+        ThemeColour("title_text", T.title_text)
+
+    LABEL_COLOUR =
+        ThemeColour("label", T.label)
+
+    XP_COLOUR =
+        ThemeColour("xp", T.xp)
+
+    AP_COLOUR =
+        ThemeColour("ap", T.ap)
+
+    GOLD_COLOUR =
+        ThemeColour("gold", T.gold)
+
+    GRAPH_BORDER_COLOUR =
+        ThemeColour("graph_border", T.graph_border)
+
+    GRAPH_BG_COLOUR =
+        ThemeColour("graph_bg", T.graph_bg)
+
+    GRAPH_GRID_COLOUR =
+        ThemeColour("graph_grid", T.graph_grid)
+end
+
+
+------------------------------------------------------------
+-- SAFE DEFAULT BEFORE INSTALL
+------------------------------------------------------------
+
+LoadTheme()
+
+
+------------------------------------------------------------
+-- WINDOW STATE
+------------------------------------------------------------
+
+windowinfo = ""
+
+valueX = TEXT_INSET + 45
+
+
+------------------------------------------------------------
+-- PERSISTED TOTALS
+------------------------------------------------------------
+
+totalXP =
+    tonumber(
+        GetVariable("totalXP")
+    ) or 0
+
+totalAP =
+    tonumber(
+        GetVariable("totalAP")
+    ) or 0
+
+totalGold =
+    tonumber(
+        GetVariable("totalGold")
+    ) or 0
+
+sessionStart =
+    tonumber(
+        GetVariable("sessionStart")
+    ) or os.time()
+
+
+------------------------------------------------------------
+-- RATE MODE
+------------------------------------------------------------
+
+rateMode =
+    GetVariable("rateMode") or "hour"
+
+if rateMode ~= "hour" and
+   rateMode ~= "minute" then
+
+    rateMode = "hour"
+
+end
+
+
+------------------------------------------------------------
+-- GRAPH HISTORY
+------------------------------------------------------------
+
+history = {}
+
+
+------------------------------------------------------------
+-- HELPERS
+------------------------------------------------------------
+
+function stripCommas(s)
+
+    return tonumber(
+        (
+            s:gsub(",", "")
+        )
+    )
+
+end
+
+
+function ElapsedSeconds()
+
+    local elapsed =
+        os.time() - sessionStart
+
+    if elapsed < 1 then
+        elapsed = 1
+    end
+
+    return elapsed
+
+end
+
+
+function ElapsedHours()
+
+    return
+        ElapsedSeconds() / 3600
+
+end
+
+
+function ElapsedMinutes()
+
+    return
+        ElapsedSeconds() / 60
+
+end
+
+
+function GetRate(total)
+
+    if rateMode == "minute" then
+
+        return
+            total / ElapsedMinutes()
+
+    else
+
+        return
+            total / ElapsedHours()
+
+    end
+
+end
+
+
+function GetGraphValue(sample,key)
+
+    local value =
+        sample[key]
+
+    if rateMode == "minute" then
+
+        return
+            value / 60
+
+    end
+
+    return value
+
+end
+
+
+function RateSuffix()
+
+    if rateMode == "minute" then
+        return "/min"
+    end
+
+    return "/hr"
+
+end
+
+
+function FormatNumber(n)
+
+    local formatted =
+        tostring(
+            math.floor(n)
+        )
+
+    local k
+
+    while true do
+
+        formatted,k =
+            formatted:gsub(
+                "^(-?%d+)(%d%d%d)",
+                "%1,%2"
+            )
+
+        if k == 0 then
+            break
+        end
+
+    end
+
+    return formatted
+
+end
+
+
+function FormatElapsed()
+
+    local elapsed =
+        os.time() - sessionStart
+
+    local h =
+        math.floor(
+            elapsed / 3600
+        )
+
+    local m =
+        math.floor(
+            (elapsed % 3600) / 60
+        )
+
+    local s =
+        elapsed % 60
+
+    return string.format(
+        "%02d:%02d:%02d",
+        h,
+        m,
+        s
+    )
+
+end
+
+
+------------------------------------------------------------
+-- CLICK CONTROLS
+------------------------------------------------------------
+
+function RateResetClick(
+    flags,
+    hotspot_id
+)
+
+    rate_reset(
+        "",
+        "",
+        {}
+    )
+end
+
+
+function RateToggleClick(
+    flags,
+    hotspot_id
+)
+
+    rate_toggle(
+        "",
+        "",
+        {}
+    )
+end
+
+
+------------------------------------------------------------
+-- INSTALL
+------------------------------------------------------------
+
+function OnPluginInstall()
+
+    LoadTheme()
+    LoadWindowSize()
+
+    check(
+        WindowCreate(
+            Win,
+            0,
+            0,
+            WINDOW_WIDTH,
+            WINDOW_HEIGHT,
+            0,
+            0,
+            BACKGROUND_COLOUR
+        )
+    )
+
+
+    check(
+        WindowFont(
+            Win,
+            "body"..Win,
+            FONT_NAME,
+            FONT_SIZE
+        )
+    )
+
+
+    check(
+        WindowFont(
+            Win,
+            "title"..Win,
+            FONT_NAME,
+            FONT_SIZE,
+            true
+        )
+    )
+
+
+    local widestLabel =
+        WindowTextWidth(
+            Win,
+            "body"..Win,
+            "Gold:"
+        )
+
+    valueX =
+        TEXT_INSET +
+        widestLabel +
+        VALUE_GAP
+
+
+    windowinfo =
+        movewindow.install(
+            Win,
+            miniwin.pos_top_right,
+            miniwin.create_absolute_location,
+            true
+        )
+
+
+    WindowCreate(
+        Win,
+        windowinfo.window_left,
+        windowinfo.window_top,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        windowinfo.window_mode,
+        windowinfo.window_flags,
+        BACKGROUND_COLOUR
+    )
+
+
+    movewindow.add_drag_handler(
+        Win,
+        0,
+        0,
+        0,
+        TITLE_HEIGHT
+    )
+
+
+    WindowAddHotspot(
+        Win,
+        "rate_reset_button",
+        WINDOW_WIDTH - 106,
+        TITLE_HEIGHT + 6,
+        WINDOW_WIDTH - 58,
+        TITLE_HEIGHT + 25,
+        "",
+        "",
+        "",
+        "",
+        "RateResetClick",
+        "Reset rates",
+        miniwin.cursor_hand,
+        0
+    )
+
+
+    WindowAddHotspot(
+        Win,
+        "rate_toggle_button",
+        WINDOW_WIDTH - 55,
+        TITLE_HEIGHT + 6,
+        WINDOW_WIDTH - 7,
+        TITLE_HEIGHT + 25,
+        "",
+        "",
+        "",
+        "",
+        "RateToggleClick",
+        "Toggle hourly/minute rates",
+        miniwin.cursor_hand,
+        0
+    )
+
+
+    Redraw_Window()
+
+    WindowShow(
+        Win,
+        true
+    )
+
+end
+
+
+------------------------------------------------------------
+-- SAVE STATE
+------------------------------------------------------------
+
+function OnPluginSaveState()
+
+    SaveWindowSize()
+
+    movewindow.save_state(
+        Win
+    )
+
+    SetVariable(
+        "totalXP",
+        tostring(totalXP)
+    )
+
+    SetVariable(
+        "totalAP",
+        tostring(totalAP)
+    )
+
+    SetVariable(
+        "totalGold",
+        tostring(totalGold)
+    )
+
+    SetVariable(
+        "sessionStart",
+        tostring(sessionStart)
+    )
+
+    SetVariable(
+        "rateMode",
+        rateMode
+    )
+
+end
+
+
+------------------------------------------------------------
+-- ENABLE / DISABLE
+------------------------------------------------------------
+
+function OnPluginEnable()
+
+    LoadTheme()
+
+    Redraw_Window()
+
+    WindowShow(
+        Win,
+        true
+    )
+
+end
+
+
+function OnPluginDisable()
+
+    WindowShow(
+        Win,
+        false
+    )
+
+end
+
+
+------------------------------------------------------------
+-- GRAPH HISTORY
+------------------------------------------------------------
+
+function PushHistorySample()
+
+    local hours =
+        ElapsedHours()
+
+    table.insert(
+        history,
+        {
+            xp =
+                totalXP / hours,
+
+            ap =
+                totalAP / hours,
+
+            gold =
+                totalGold / hours
+        }
+    )
+
+
+    if #history >
+       GRAPH_MAX_SAMPLES then
+
+        table.remove(
+            history,
+            1
+        )
+
+    end
+
+end
+
+
+------------------------------------------------------------
+-- DRAW A GRAPH
+------------------------------------------------------------
+
+function Draw_Single_Graph(
+    top,
+    height,
+    key,
+    colour,
+    label
+)
+
+    local left =
+        GRAPH_MARGIN
+
+    local right =
+        WINDOW_WIDTH -
+        GRAPH_MARGIN
+
+    local bottom =
+        top +
+        height
+
+
+    WindowRectOp(
+        Win,
+        miniwin.rect_fill,
+        left,
+        top,
+        right,
+        bottom,
+        GRAPH_BG_COLOUR
+    )
+
+
+    WindowRectOp(
+        Win,
+        miniwin.rect_frame,
+        left,
+        top,
+        right,
+        bottom,
+        GRAPH_BORDER_COLOUR
+    )
+
+
+    --------------------------------------------------------
+    -- Subtle terminal-style horizontal guides.
+    --------------------------------------------------------
+
+    for grid = 1, 3 do
+
+        local gy =
+            top +
+            (
+                height *
+                grid /
+                4
+            )
+
+        WindowLine(
+            Win,
+            left + 1,
+            gy,
+            right - 1,
+            gy,
+            GRAPH_GRID_COLOUR,
+            miniwin.pen_solid,
+            1
+        )
+
+    end
+
+
+    WindowText(
+        Win,
+        "body"..Win,
+        label,
+        left + 4,
+        top + 1,
+        0,
+        0,
+        colour,
+        false
+    )
+
+
+    if #history < 2 then
+
+        WindowText(
+            Win,
+            "body"..Win,
+            "Gathering data...",
+            left + 4,
+            top + 12,
+            0,
+            0,
+            LABEL_COLOUR,
+            false
+        )
+
+        return
+
+    end
+
+
+    local minV =
+        math.huge
+
+    local maxV =
+        -math.huge
+
+
+    for _,sample in ipairs(history) do
+
+        local v =
+            GetGraphValue(
+                sample,
+                key
+            )
+
+        if v < minV then
+            minV = v
+        end
+
+        if v > maxV then
+            maxV = v
+        end
+
+    end
+
+
+    local range =
+        maxV - minV
+
+    if range < 1 then
+        range = 1
+    end
+
+
+    local usableWidth =
+        (right - left) - 10
+
+    local usableHeight =
+        height - 14
+
+    local graphBottom =
+        bottom - 3
+
+
+    local stepX =
+        usableWidth /
+        (
+            GRAPH_MAX_SAMPLES - 1
+        )
+
+
+    local startIndex =
+        GRAPH_MAX_SAMPLES -
+        #history
+
+
+    local prevX = nil
+    local prevY = nil
+
+
+    for i,sample in ipairs(history) do
+
+        local x =
+            left +
+            5 +
+            (
+                startIndex +
+                i -
+                1
+            ) *
+            stepX
+
+
+        local value =
+            GetGraphValue(
+                sample,
+                key
+            )
+
+
+        local normalised =
+            (
+                value -
+                minV
+            ) /
+            range
+
+
+        local y =
+            graphBottom -
+            (
+                normalised *
+                usableHeight
+            )
+
+
+        if prevX then
+
+            WindowLine(
+                Win,
+                prevX,
+                prevY,
+                x,
+                y,
+                colour,
+                miniwin.pen_solid,
+                1
+            )
+
+        end
+
+
+        prevX = x
+        prevY = y
+
+    end
+
+end
+
+
+------------------------------------------------------------
+-- DRAW ALL GRAPHS
+------------------------------------------------------------
+
+function Draw_Graphs(top)
+
+    GRAPH_HEIGHT = math.max(55, WINDOW_HEIGHT - top - 14)
+
+    local eachHeight =
+        (
+            GRAPH_HEIGHT -
+            (
+                GRAPH_GAP *
+                2
+            )
+        ) / 3
+
+
+    local suffix =
+        RateSuffix()
+
+
+    Draw_Single_Graph(
+        top,
+        eachHeight,
+        "xp",
+        XP_COLOUR,
+        "XP"..suffix
+    )
+
+
+    Draw_Single_Graph(
+        top +
+        eachHeight +
+        GRAPH_GAP,
+        eachHeight,
+        "ap",
+        AP_COLOUR,
+        "AP"..suffix
+    )
+
+
+    Draw_Single_Graph(
+        top +
+        (
+            eachHeight +
+            GRAPH_GAP
+        ) *
+        2,
+        eachHeight,
+        "gold",
+        GOLD_COLOUR,
+        "Gold"..suffix
+    )
+
+end
+
+
+------------------------------------------------------------
+-- REDRAW
+------------------------------------------------------------
+
+function Redraw_Window()
+
+    WindowRectOp(
+        Win,
+        miniwin.rect_fill,
+        0,
+        0,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        BACKGROUND_COLOUR
+    )
+
+
+    WindowRectOp(
+        Win,
+        miniwin.rect_frame,
+        0,
+        0,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        BORDER_COLOUR
+    )
+
+
+    --------------------------------------------------------
+    -- Title bar
+    --------------------------------------------------------
+
+    WindowRectOp(
+        Win,
+        miniwin.rect_fill,
+        0,
+        0,
+        WINDOW_WIDTH,
+        TITLE_HEIGHT,
+        TITLE_COLOUR
+    )
+
+
+    WindowLine(
+        Win,
+        0,
+        TITLE_HEIGHT - 1,
+        WINDOW_WIDTH,
+        TITLE_HEIGHT - 1,
+        BORDER_COLOUR,
+        miniwin.pen_solid,
+        1
+    )
+
+
+    WindowText(
+        Win,
+        "title"..Win,
+        "XP / AP / GOLD RATES",
+        8,
+        4,
+        WINDOW_WIDTH - 8,
+        TITLE_HEIGHT,
+        TITLE_TEXT_COLOUR,
+        false
+    )
+
+
+    --------------------------------------------------------
+    -- RESET / TOGGLE BUTTONS
+    --------------------------------------------------------
+
+    local buttonTop =
+        TITLE_HEIGHT + 6
+
+    local buttonBottom =
+        TITLE_HEIGHT + 25
+
+
+    WindowRectOp(
+        Win,
+        miniwin.rect_fill,
+        WINDOW_WIDTH - 106,
+        buttonTop,
+        WINDOW_WIDTH - 58,
+        buttonBottom,
+        GRAPH_BG_COLOUR
+    )
+
+
+    WindowRectOp(
+        Win,
+        miniwin.rect_frame,
+        WINDOW_WIDTH - 106,
+        buttonTop,
+        WINDOW_WIDTH - 58,
+        buttonBottom,
+        BORDER_COLOUR
+    )
+
+
+    WindowText(
+        Win,
+        "body"..Win,
+        "RESET",
+        WINDOW_WIDTH - 101,
+        buttonTop + 3,
+        WINDOW_WIDTH - 58,
+        buttonBottom,
+        LABEL_COLOUR,
+        false
+    )
+
+
+    WindowRectOp(
+        Win,
+        miniwin.rect_fill,
+        WINDOW_WIDTH - 55,
+        buttonTop,
+        WINDOW_WIDTH - 7,
+        buttonBottom,
+        GRAPH_BG_COLOUR
+    )
+
+
+    WindowRectOp(
+        Win,
+        miniwin.rect_frame,
+        WINDOW_WIDTH - 55,
+        buttonTop,
+        WINDOW_WIDTH - 7,
+        buttonBottom,
+        BORDER_COLOUR
+    )
+
+
+    WindowText(
+        Win,
+        "body"..Win,
+        "TOGGLE",
+        WINDOW_WIDTH - 53,
+        buttonTop + 3,
+        WINDOW_WIDTH - 7,
+        buttonBottom,
+        LABEL_COLOUR,
+        false
+    )
+
+
+    --------------------------------------------------------
+    -- Current rates
+    --------------------------------------------------------
+
+    local xpRate =
+        GetRate(totalXP)
+
+    local apRate =
+        GetRate(totalAP)
+
+    local goldRate =
+        GetRate(totalGold)
+
+    local suffix =
+        RateSuffix()
+
+
+    local y =
+        TITLE_HEIGHT +
+        6
+
+
+    WindowText(
+        Win,
+        "body"..Win,
+        "XP:",
+        TEXT_INSET,
+        y,
+        0,
+        0,
+        LABEL_COLOUR,
+        false
+    )
+
+
+    WindowText(
+        Win,
+        "body"..Win,
+
+        FormatNumber(totalXP) ..
+        "  (" ..
+        FormatNumber(xpRate) ..
+        suffix ..
+        ")",
+
+        valueX,
+        y,
+        0,
+        0,
+        XP_COLOUR,
+        false
+    )
+
+
+    y =
+        y +
+        LINE_HEIGHT
+
+
+    WindowText(
+        Win,
+        "body"..Win,
+        "AP:",
+        TEXT_INSET,
+        y,
+        0,
+        0,
+        LABEL_COLOUR,
+        false
+    )
+
+
+    WindowText(
+        Win,
+        "body"..Win,
+
+        FormatNumber(totalAP) ..
+        "  (" ..
+        FormatNumber(apRate) ..
+        suffix ..
+        ")",
+
+        valueX,
+        y,
+        0,
+        0,
+        AP_COLOUR,
+        false
+    )
+
+
+    y =
+        y +
+        LINE_HEIGHT
+
+
+    WindowText(
+        Win,
+        "body"..Win,
+        "Gold:",
+        TEXT_INSET,
+        y,
+        0,
+        0,
+        LABEL_COLOUR,
+        false
+    )
+
+
+    WindowText(
+        Win,
+        "body"..Win,
+
+        FormatNumber(totalGold) ..
+        "  (" ..
+        FormatNumber(goldRate) ..
+        suffix ..
+        ")",
+
+        valueX,
+        y,
+        0,
+        0,
+        GOLD_COLOUR,
+        false
+    )
+
+
+    y =
+        y +
+        LINE_HEIGHT +
+        2
+
+
+    WindowText(
+        Win,
+        "body"..Win,
+        "Session: " ..
+        FormatElapsed(),
+
+        TEXT_INSET,
+        y,
+        0,
+        0,
+        LABEL_COLOUR,
+        false
+    )
+
+
+    y =
+        y +
+        LINE_HEIGHT +
+        1
+
+
+    Draw_Graphs(
+        y
+    )
+
+
+    InstallResizeHandle()
+    Redraw()
+
+end
+
+
+------------------------------------------------------------
+-- XP / AP / GOLD EVENT
+------------------------------------------------------------
+
+function OnKillLine(
+    name,
+    line,
+    wildcards
+)
+
+    local xp =
+        stripCommas(
+            wildcards[1]
+        )
+
+    local ap =
+        stripCommas(
+            wildcards[2]
+        )
+
+    local gold =
+        stripCommas(
+            wildcards[3]
+        )
+
+
+    if xp then
+        totalXP = totalXP + xp
+    end
+
+    if ap then
+        totalAP = totalAP + ap
+    end
+
+    if gold then
+        totalGold = totalGold + gold
+    end
+
+
+    Redraw_Window()
+
+end
+
+
+------------------------------------------------------------
+-- TIMER
+------------------------------------------------------------
+
+function TickUpdate()
+
+    PushHistorySample()
+
+    Redraw_Window()
+
+end
+
+
+------------------------------------------------------------
+-- RESET
+------------------------------------------------------------
+
+function rate_reset(
+    name,
+    line,
+    wildcards
+)
+
+    totalXP = 0
+    totalAP = 0
+    totalGold = 0
+
+    sessionStart =
+        os.time()
+
+    history = {}
+
+    Redraw_Window()
+
+
+    ColourNote(
+        "yellow",
+        "",
+        "Rate tracker reset."
+    )
+
+end
+
+
+------------------------------------------------------------
+-- SHOW
+------------------------------------------------------------
+
+function rate_show(
+    name,
+    line,
+    wildcards
+)
+
+    WindowShow(
+        Win,
+        true
+    )
+
+    ColourNote(
+        "yellow",
+        "",
+        "Rate window shown."
+    )
+
+end
+
+
+------------------------------------------------------------
+-- HIDE
+------------------------------------------------------------
+
+function rate_hide(
+    name,
+    line,
+    wildcards
+)
+
+    WindowShow(
+        Win,
+        false
+    )
+
+    ColourNote(
+        "yellow",
+        "",
+        "Rate window hidden."
+    )
+
+end
+
+
+------------------------------------------------------------
+-- HOURLY MODE
+------------------------------------------------------------
+
+function rate_hour(
+    name,
+    line,
+    wildcards
+)
+
+    rateMode =
+        "hour"
+
+    SetVariable(
+        "rateMode",
+        rateMode
+    )
+
+    Redraw_Window()
+
+
+    ColourNote(
+        "yellow",
+        "",
+        "Rate display set to per hour."
+    )
+
+end
+
+
+------------------------------------------------------------
+-- PER-MINUTE MODE
+------------------------------------------------------------
+
+function rate_minute(
+    name,
+    line,
+    wildcards
+)
+
+    rateMode =
+        "minute"
+
+    SetVariable(
+        "rateMode",
+        rateMode
+    )
+
+    Redraw_Window()
+
+
+    ColourNote(
+        "yellow",
+        "",
+        "Rate display set to per minute."
+    )
+
+end
+
+
+------------------------------------------------------------
+-- TOGGLE MODE
+------------------------------------------------------------
+
+function rate_toggle(
+    name,
+    line,
+    wildcards
+)
+
+    if rateMode == "hour" then
+
+        rateMode =
+            "minute"
+
+    else
+
+        rateMode =
+            "hour"
+
+    end
+
+
+    SetVariable(
+        "rateMode",
+        rateMode
+    )
+
+
+    Redraw_Window()
+
+
+    if rateMode == "hour" then
+
+        ColourNote(
+            "yellow",
+            "",
+            "Rate display set to per hour."
+        )
+
+    else
+
+        ColourNote(
+            "yellow",
+            "",
+            "Rate display set to per minute."
+        )
+
+    end
+
+end
+
+
+------------------------------------------------------------
+-- THEME BROADCAST
+------------------------------------------------------------
+
+function OnPluginBroadcast(
+    msg,
+    id,
+    name,
+    text
+)
+
+    if msg ~= THEME_BROADCAST_MESSAGE then
+        return
+    end
+
+    if id ~= THEME_CONTROLLER_ID then
+        return
+    end
+
+    LoadTheme()
+
+    Redraw_Window()
+end
+
+
+
+
+--------------------------------------------------
+-- PLUGIN CONTROLLER LAYOUT API
+--------------------------------------------------
+
+function ManagedLayoutParse(spec)
+    local windowName, sx, sy, sw, sh =
+        tostring(spec or ""):match("^([^\t]+)\t(-?%d+)\t(-?%d+)\t(%d+)\t(%d+)$")
+    if not windowName then return nil end
+    return windowName, tonumber(sx), tonumber(sy), tonumber(sw), tonumber(sh)
+end
+
+function ManagedLayoutSetMoveWindowInfo(info, winName, x, y)
+    if type(info) ~= "table" then return end
+    info.window_left = x
+    info.window_top = y
+    info.window_mode = tonumber(WindowInfo(winName, 7)) or info.window_mode or miniwin.pos_top_left
+    info.window_flags = tonumber(WindowInfo(winName, 8)) or info.window_flags or miniwin.create_absolute_location
+end
+
+function GetManagedLayoutWindows()
+    return Win
+end
+
+function ApplyManagedLayout(spec)
+    local windowName, x, y, w, h = ManagedLayoutParse(spec)
+    if windowName ~= Win then return "wrong window" end
+
+    WINDOW_WIDTH = math.max(MIN_WINDOW_WIDTH, math.floor(w))
+    WINDOW_HEIGHT = math.max(MIN_WINDOW_HEIGHT, math.floor(h))
+    SaveWindowSize()
+
+    WindowResize(
+        Win,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        BACKGROUND_COLOUR
+    )
+
+    ManagedLayoutSetMoveWindowInfo(windowinfo, Win, x, y)
+    Redraw_Window()
+
+    local mode = type(windowinfo) == "table" and windowinfo.window_mode or miniwin.pos_top_left
+    local flags = type(windowinfo) == "table" and windowinfo.window_flags or miniwin.create_absolute_location
+    WindowPosition(Win, x, y, mode, flags)
+    if movewindow then movewindow.save_state(Win) end
+    pcall(SaveState)
+    Redraw()
+    return "ok"
+end
+
+]]>
+</script>
+
+</muclient>

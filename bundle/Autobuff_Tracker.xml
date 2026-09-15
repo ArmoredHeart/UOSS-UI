@@ -1,0 +1,1332 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+
+<muclient>
+
+<plugin
+    name="Autobuff_Tracker"
+    author="ChatGPT"
+    id="e6b4af7c21934f40891cba37"
+    language="Lua"
+    purpose="Shows enabled status for Aegis, BuildUp, and Endurance autobuff triggers"
+    date_written="2026-09-07"
+    version="1.2"
+    save_state="y"
+>
+
+<description trim="y">
+<![CDATA[
+AUTOBUFF TRACKER
+
+Displays the current enabled/disabled state of:
+
+    Aegis
+    BuildUp
+    Endurance
+
+Default theme: green = enabled, red = disabled.
+Amber/Green themes: bright lamp = enabled, dim lamp = disabled.
+Gray lamp = trigger not found
+
+The lamps are clickable.
+
+Clicking a lamp runs the existing aliases:
+
+    Aegis:
+        agon
+        agoff
+
+    BuildUp:
+        bon
+        boff
+
+    Endurance:
+        endon
+        endoff
+
+Commands:
+
+    autobuffs show
+    autobuffs hide
+]]>
+
+Modular theme client: colours are supplied by UI_Theme_Controller v2.0 when available.
+</description>
+
+</plugin>
+
+
+<aliases>
+
+    <alias
+        name="AutobuffTracker_Show"
+        script="autobuffs_show"
+        match="^autobuffs show$"
+        regexp="y"
+        ignore_case="y"
+        enabled="y"
+        sequence="100"
+    ></alias>
+
+
+    <alias
+        name="AutobuffTracker_Hide"
+        script="autobuffs_hide"
+        match="^autobuffs hide$"
+        regexp="y"
+        ignore_case="y"
+        enabled="y"
+        sequence="100"
+    ></alias>
+
+</aliases>
+
+
+<timers>
+
+    <!--
+        Poll the REAL world-trigger states.
+
+        This also means the window notices changes made through
+        your existing aliases or the MUSHclient trigger dialog.
+    -->
+
+    <timer
+        name="AutobuffTracker_Poll"
+        second="0.25"
+        enabled="y"
+        script="PollAutobuffs"
+    ></timer>
+
+</timers>
+
+
+<script>
+<![CDATA[
+
+require "movewindow"
+
+Win = GetPluginID()
+
+
+--------------------------------------------------
+-- WINDOW
+--------------------------------------------------
+
+WINDOW_WIDTH  = 205
+WINDOW_HEIGHT = 105
+
+TITLE_HEIGHT = 21
+
+ROW_HEIGHT = 27
+
+TITLE_FONT_NAME = "Lucida Console"
+TITLE_FONT_SIZE = 9
+
+BODY_FONT_NAME = "Lucida Console"
+BODY_FONT_SIZE = 10
+
+
+--------------------------------------------------
+-- SHARED UI THEMES
+--------------------------------------------------
+
+THEME_CONTROLLER_ID =
+    "43c8d047be7a418ba5e86916"
+
+THEME_BROADCAST_MESSAGE = 9042
+
+
+--------------------------------------------------
+-- MODULAR THEME CLIENT
+--
+-- The controller owns the real palette. The local THEMES table
+-- below is retained only as a safe fallback if the controller
+-- is unavailable.
+--------------------------------------------------
+
+local THEME_PROFILE =
+    "autobuff"
+
+
+function ThemeColour(
+    role,
+    fallback
+)
+
+    local rc,
+          value =
+        CallPlugin(
+            THEME_CONTROLLER_ID,
+            "GetThemeColour",
+            THEME_PROFILE,
+            role
+        )
+
+
+    if rc ==
+       error_code.eOK and
+       type(
+           value
+       ) ==
+       "string" and
+       value ~=
+       ""
+    then
+
+        return
+            ColourNameToRGB(
+                value
+            )
+
+    end
+
+
+    return
+        ColourNameToRGB(
+            fallback
+        )
+end
+
+
+THEMES = {
+
+    default = {
+        background = "#000000",
+        border = "#808080",
+        title_bar = "darkslategray",
+        title_text = "gold",
+        label = "#D4D0C8",
+        row_separator = "#282828",
+
+        bezel_fill = "#2A2A2A",
+        bezel_border = "#000000",
+
+        on_outer = "#0D4D1A",
+        on_middle = "#1F9E3D",
+        on_inner = "#4DFF6E",
+        on_highlight = "#CFFFD9",
+
+        off_outer = "#4D0D0D",
+        off_middle = "#9E1F1F",
+        off_inner = "#FF4D4D",
+        off_highlight = "#FFD9D9"
+    },
+
+    amber = {
+        background = "#050301",
+        border = "#6B3D18",
+        title_bar = "#160B03",
+        title_text = "#FFB347",
+        label = "#D9822B",
+        row_separator = "#2D1809",
+
+        bezel_fill = "#24160B",
+        bezel_border = "#050301",
+
+        on_outer = "#6B3308",
+        on_middle = "#C66A12",
+        on_inner = "#FF9D26",
+        on_highlight = "#FFE0A3",
+
+        off_outer = "#201207",
+        off_middle = "#35200D",
+        off_inner = "#4A2A0D",
+        off_highlight = "#69401B"
+    },
+
+    green = {
+        background = "#000500",
+        border = "#285B28",
+        title_bar = "#061306",
+        title_text = "#9AFF82",
+        label = "#67C967",
+        row_separator = "#102A10",
+
+        bezel_fill = "#102010",
+        bezel_border = "#000500",
+
+        on_outer = "#0D4D1A",
+        on_middle = "#1F9E3D",
+        on_inner = "#4DFF6E",
+        on_highlight = "#CFFFD9",
+
+        off_outer = "#061507",
+        off_middle = "#0B2910",
+        off_inner = "#123B17",
+        off_highlight = "#20582A"
+    }
+}
+
+function LoadTheme()
+
+    local theme =
+        GetPluginVariable(
+            THEME_CONTROLLER_ID,
+            "theme"
+        )
+
+    if not THEMES[theme] then
+        theme = "default"
+    end
+
+    local T = THEMES[theme]
+
+    BACKGROUND_COLOUR = ThemeColour("background", T.background)
+    BORDER_COLOUR = ThemeColour("border", T.border)
+    TITLE_BAR_COLOUR = ThemeColour("title_bar", T.title_bar)
+    TITLE_TEXT_COLOUR = ThemeColour("title_text", T.title_text)
+    LABEL_COLOUR = ThemeColour("label", T.label)
+    ROW_SEPARATOR_COLOUR = ThemeColour("row_separator", T.row_separator)
+
+    BEZEL_FILL = ThemeColour("bezel_fill", T.bezel_fill)
+    BEZEL_BORDER = ThemeColour("bezel_border", T.bezel_border)
+
+    ON_OUTER = ThemeColour("on_outer", T.on_outer)
+    ON_MIDDLE = ThemeColour("on_middle", T.on_middle)
+    ON_INNER = ThemeColour("on_inner", T.on_inner)
+    ON_HIGHLIGHT = ThemeColour("on_highlight", T.on_highlight)
+
+    OFF_OUTER = ThemeColour("off_outer", T.off_outer)
+    OFF_MIDDLE = ThemeColour("off_middle", T.off_middle)
+    OFF_INNER = ThemeColour("off_inner", T.off_inner)
+    OFF_HIGHLIGHT = ThemeColour("off_highlight", T.off_highlight)
+
+    MISSING_OUTER = ColourNameToRGB("#252525")
+    MISSING_MIDDLE = ColourNameToRGB("#555555")
+    MISSING_INNER = ColourNameToRGB("#888888")
+    MISSING_HIGHLIGHT = ColourNameToRGB("#D0D0D0")
+end
+
+LoadTheme()
+
+
+--------------------------------------------------
+-- AUTOBUFF DEFINITIONS
+--------------------------------------------------
+
+autobuffs = {
+
+    {
+        name = "Aegis",
+        trigger = "ag",
+
+        enableAlias = "agon",
+        disableAlias = "agoff",
+
+        hotspot = "autobuff_aegis"
+    },
+
+    {
+        name = "BuildUp",
+        trigger = "b",
+
+        enableAlias = "bon",
+        disableAlias = "boff",
+
+        hotspot = "autobuff_buildup"
+    },
+
+    {
+        name = "Endurance",
+        trigger = "end",
+
+        enableAlias = "endon",
+        disableAlias = "endoff",
+
+        hotspot = "autobuff_endurance"
+    }
+
+}
+
+
+--------------------------------------------------
+-- STATE
+--
+-- true  = enabled
+-- false = disabled
+-- nil   = trigger could not be found
+--------------------------------------------------
+
+buffStates = {}
+
+windowinfo = ""
+
+windowVisible = true
+
+
+--------------------------------------------------
+-- READ GLOBAL/WORLD TRIGGER STATE
+--------------------------------------------------
+
+function GetWorldTriggerState(triggerName)
+
+    --------------------------------------------------
+    -- Empty plugin ID means global/world triggers.
+    --
+    -- InfoType 8 = enabled.
+    --------------------------------------------------
+
+    local state =
+        GetPluginTriggerInfo(
+            "",
+            triggerName,
+            8
+        )
+
+
+    if state == nil then
+        return nil
+    end
+
+
+    if state == true then
+        return true
+    end
+
+
+    if state == false then
+        return false
+    end
+
+
+    --------------------------------------------------
+    -- Defensive handling in case MUSHclient returns
+    -- a numeric boolean variant.
+    --------------------------------------------------
+
+    if state == 1 then
+        return true
+    end
+
+
+    if state == 0 then
+        return false
+    end
+
+
+    return nil
+
+end
+
+
+--------------------------------------------------
+-- READ ALL THREE STATES
+--------------------------------------------------
+
+function RefreshStates()
+
+    local changed = false
+
+
+    for index, buff in ipairs(
+        autobuffs
+    ) do
+
+        local newState =
+            GetWorldTriggerState(
+                buff.trigger
+            )
+
+
+        if buffStates[index] ~=
+           newState
+        then
+
+            buffStates[index] =
+                newState
+
+
+            changed = true
+
+        end
+
+    end
+
+
+    return changed
+
+end
+
+
+--------------------------------------------------
+-- GLOSSY LAMP
+--
+-- Adapted from the layered lamp style in the
+-- Chakra Cooldown plugin.
+--------------------------------------------------
+
+function DrawLamp(
+    left,
+    top,
+    right,
+    bottom,
+    outerColour,
+    middleColour,
+    innerColour,
+    highlightColour
+)
+
+    local width =
+        right -
+        left
+
+
+    local height =
+        bottom -
+        top
+
+
+    --------------------------------------------------
+    -- Dark outer layer
+    --------------------------------------------------
+
+    WindowCircleOp(
+        Win,
+        miniwin.circle_ellipse,
+
+        left,
+        top,
+        right,
+        bottom,
+
+        outerColour,
+        miniwin.pen_null,
+        0,
+
+        outerColour,
+        miniwin.brush_solid
+    )
+
+
+    --------------------------------------------------
+    -- Middle glow
+    --------------------------------------------------
+
+    local midInset =
+        width *
+        0.18
+
+
+    WindowCircleOp(
+        Win,
+        miniwin.circle_ellipse,
+
+        left + midInset,
+        top + midInset,
+
+        right - midInset,
+        bottom - midInset,
+
+        middleColour,
+        miniwin.pen_null,
+        0,
+
+        middleColour,
+        miniwin.brush_solid
+    )
+
+
+    --------------------------------------------------
+    -- Bright centre
+    --------------------------------------------------
+
+    local innerInset =
+        width *
+        0.38
+
+
+    WindowCircleOp(
+        Win,
+        miniwin.circle_ellipse,
+
+        left + innerInset,
+        top + innerInset,
+
+        right - innerInset,
+        bottom - innerInset,
+
+        innerColour,
+        miniwin.pen_null,
+        0,
+
+        innerColour,
+        miniwin.brush_solid
+    )
+
+
+    --------------------------------------------------
+    -- Highlight
+    --------------------------------------------------
+
+    local highlightDiameter =
+        width *
+        0.26
+
+
+    local highlightLeft =
+        left +
+        (
+            width *
+            0.15
+        )
+
+
+    local highlightTop =
+        top +
+        (
+            height *
+            0.13
+        )
+
+
+    WindowCircleOp(
+        Win,
+        miniwin.circle_ellipse,
+
+        highlightLeft,
+        highlightTop,
+
+        highlightLeft +
+        highlightDiameter,
+
+        highlightTop +
+        highlightDiameter,
+
+        highlightColour,
+        miniwin.pen_null,
+        0,
+
+        highlightColour,
+        miniwin.brush_solid
+    )
+
+end
+
+
+--------------------------------------------------
+-- DRAW ONE SMALL STATUS LIGHT
+--------------------------------------------------
+
+function DrawStatusLamp(
+    centreX,
+    centreY,
+    state
+)
+
+    --------------------------------------------------
+    -- Small enough to work like an instrument-panel LED.
+    --------------------------------------------------
+
+    local diameter = 15
+
+    local radius =
+        diameter /
+        2
+
+
+    local left =
+        centreX -
+        radius
+
+
+    local top =
+        centreY -
+        radius
+
+
+    local right =
+        centreX +
+        radius
+
+
+    local bottom =
+        centreY +
+        radius
+
+
+    --------------------------------------------------
+    -- Bezel
+    --------------------------------------------------
+
+    local bezelPad = 3
+
+
+    WindowCircleOp(
+        Win,
+        miniwin.circle_ellipse,
+
+        left - bezelPad,
+        top - bezelPad,
+
+        right + bezelPad,
+        bottom + bezelPad,
+
+        BEZEL_BORDER,
+        miniwin.pen_solid,
+        1,
+
+        BEZEL_FILL,
+        miniwin.brush_solid
+    )
+
+
+    --------------------------------------------------
+    -- Lamp
+    --------------------------------------------------
+
+    if state == true then
+
+        DrawLamp(
+            left,
+            top,
+            right,
+            bottom,
+
+            ON_OUTER,
+            ON_MIDDLE,
+            ON_INNER,
+            ON_HIGHLIGHT
+        )
+
+
+    elseif state == false then
+
+        DrawLamp(
+            left,
+            top,
+            right,
+            bottom,
+
+            OFF_OUTER,
+            OFF_MIDDLE,
+            OFF_INNER,
+            OFF_HIGHLIGHT
+        )
+
+
+    else
+
+        DrawLamp(
+            left,
+            top,
+            right,
+            bottom,
+
+            MISSING_OUTER,
+            MISSING_MIDDLE,
+            MISSING_INNER,
+            MISSING_HIGHLIGHT
+        )
+
+    end
+
+end
+
+
+--------------------------------------------------
+-- DRAW WINDOW
+--------------------------------------------------
+
+function Redraw_Window()
+
+    --------------------------------------------------
+    -- Background
+    --------------------------------------------------
+
+    WindowRectOp(
+        Win,
+        miniwin.rect_fill,
+
+        0,
+        0,
+
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+
+        BACKGROUND_COLOUR
+    )
+
+
+    --------------------------------------------------
+    -- Title bar
+    --------------------------------------------------
+
+    WindowRectOp(
+        Win,
+        miniwin.rect_fill,
+
+        0,
+        0,
+
+        WINDOW_WIDTH,
+        TITLE_HEIGHT,
+
+        TITLE_BAR_COLOUR
+    )
+
+
+    WindowLine(
+        Win,
+
+        0,
+        TITLE_HEIGHT - 1,
+
+        WINDOW_WIDTH,
+        TITLE_HEIGHT - 1,
+
+        BORDER_COLOUR,
+        miniwin.pen_solid,
+        1
+    )
+
+
+    WindowText(
+        Win,
+        "title"..Win,
+        "AUTOBUFFS",
+
+        8,
+        3,
+
+        WINDOW_WIDTH - 8,
+        TITLE_HEIGHT,
+
+        TITLE_TEXT_COLOUR,
+        false
+    )
+
+
+    --------------------------------------------------
+    -- Rows
+    --------------------------------------------------
+
+    for index, buff in ipairs(
+        autobuffs
+    ) do
+
+        local rowTop =
+            TITLE_HEIGHT +
+            (
+                (index - 1) *
+                ROW_HEIGHT
+            )
+
+
+        local rowBottom =
+            rowTop +
+            ROW_HEIGHT
+
+
+        local centreY =
+            rowTop +
+            math.floor(
+                ROW_HEIGHT /
+                2
+            )
+
+
+        --------------------------------------------------
+        -- Label
+        --------------------------------------------------
+
+        WindowText(
+            Win,
+            "body"..Win,
+            buff.name,
+
+            11,
+            rowTop + 6,
+
+            145,
+            rowBottom,
+
+            LABEL_COLOUR,
+            false
+        )
+
+
+        --------------------------------------------------
+        -- Status lamp
+        --------------------------------------------------
+
+        DrawStatusLamp(
+            176,
+            centreY,
+            buffStates[
+                index
+            ]
+        )
+
+
+        --------------------------------------------------
+        -- Row separator
+        --------------------------------------------------
+
+        if index <
+           #autobuffs
+        then
+
+            WindowLine(
+                Win,
+
+                8,
+                rowBottom - 1,
+
+                WINDOW_WIDTH - 8,
+                rowBottom - 1,
+
+                ROW_SEPARATOR_COLOUR,
+
+                miniwin.pen_solid,
+                1
+            )
+
+        end
+
+    end
+
+
+    --------------------------------------------------
+    -- Border
+    --------------------------------------------------
+
+    WindowRectOp(
+        Win,
+        miniwin.rect_frame,
+
+        0,
+        0,
+
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+
+        BORDER_COLOUR
+    )
+
+
+    Redraw()
+
+end
+
+
+--------------------------------------------------
+-- POLLING
+--------------------------------------------------
+
+function PollAutobuffs()
+
+    if RefreshStates() then
+
+        Redraw_Window()
+
+    end
+
+end
+
+
+--------------------------------------------------
+-- CLICK HANDLER
+--------------------------------------------------
+
+function ToggleAutobuff(
+    flags,
+    hotspot_id
+)
+
+    for index, buff in ipairs(
+        autobuffs
+    ) do
+
+        if buff.hotspot ==
+           hotspot_id
+        then
+
+            local state =
+                GetWorldTriggerState(
+                    buff.trigger
+                )
+
+
+            --------------------------------------------------
+            -- Trigger missing.
+            --------------------------------------------------
+
+            if state == nil then
+
+                ColourNote(
+                    "red",
+                    "",
+                    "Autobuff trigger '" ..
+                    buff.trigger ..
+                    "' was not found."
+                )
+
+
+                return
+
+            end
+
+
+            --------------------------------------------------
+            -- Use the user's EXISTING aliases to make the
+            -- change.
+            --------------------------------------------------
+
+            if state then
+
+                Execute(
+                    buff.disableAlias
+                )
+
+            else
+
+                Execute(
+                    buff.enableAlias
+                )
+
+            end
+
+
+            --------------------------------------------------
+            -- Existing alias executes first; poll almost
+            -- immediately afterward to update the lamp.
+            --------------------------------------------------
+
+            DoAfterSpecial(
+                0.05,
+                "PollAutobuffs()",
+                sendto.script
+            )
+
+            return
+
+        end
+
+    end
+
+end
+
+
+--------------------------------------------------
+-- INSTALL HOTSPOTS
+--------------------------------------------------
+
+function InstallHotspots()
+
+    for index, buff in ipairs(
+        autobuffs
+    ) do
+
+        local rowTop =
+            TITLE_HEIGHT +
+            (
+                (index - 1) *
+                ROW_HEIGHT
+            )
+
+
+        local rowBottom =
+            rowTop +
+            ROW_HEIGHT
+
+
+        --------------------------------------------------
+        -- Whole row is clickable, not merely the tiny lamp.
+        --------------------------------------------------
+
+        WindowAddHotspot(
+            Win,
+            buff.hotspot,
+
+            0,
+            rowTop,
+
+            WINDOW_WIDTH,
+            rowBottom,
+
+            "",
+            "",
+            "",
+            "",
+            "ToggleAutobuff",
+
+            "Toggle " ..
+            buff.name,
+
+            miniwin.cursor_hand,
+            0
+        )
+
+    end
+
+end
+
+
+--------------------------------------------------
+-- INSTALL
+--------------------------------------------------
+
+function OnPluginInstall()
+
+    LoadTheme()
+
+    --------------------------------------------------
+    -- Initial placeholder window
+    --------------------------------------------------
+
+    check(
+        WindowCreate(
+            Win,
+            0,
+            0,
+
+            WINDOW_WIDTH,
+            WINDOW_HEIGHT,
+
+            0,
+            0,
+
+            BACKGROUND_COLOUR
+        )
+    )
+
+
+    --------------------------------------------------
+    -- Fonts
+    --------------------------------------------------
+
+    check(
+        WindowFont(
+            Win,
+            "title"..Win,
+
+            TITLE_FONT_NAME,
+            TITLE_FONT_SIZE,
+
+            true
+        )
+    )
+
+
+    check(
+        WindowFont(
+            Win,
+            "body"..Win,
+
+            BODY_FONT_NAME,
+            BODY_FONT_SIZE,
+
+            false
+        )
+    )
+
+
+    --------------------------------------------------
+    -- Movable window
+    --------------------------------------------------
+
+    windowinfo =
+        movewindow.install(
+            Win,
+            miniwin.pos_top_right,
+            miniwin.create_absolute_location,
+            true
+        )
+
+
+    check(
+        WindowCreate(
+            Win,
+
+            windowinfo.window_left,
+            windowinfo.window_top,
+
+            WINDOW_WIDTH,
+            WINDOW_HEIGHT,
+
+            windowinfo.window_mode,
+            windowinfo.window_flags,
+
+            BACKGROUND_COLOUR
+        )
+    )
+
+
+    --------------------------------------------------
+    -- Title-bar dragging
+    --------------------------------------------------
+
+    movewindow.add_drag_handler(
+        Win,
+        0,
+        0,
+        0,
+        TITLE_HEIGHT
+    )
+
+
+    --------------------------------------------------
+    -- Clickable autobuff rows
+    --------------------------------------------------
+
+    InstallHotspots()
+
+
+    --------------------------------------------------
+    -- Read actual initial states
+    --------------------------------------------------
+
+    RefreshStates()
+
+
+    Redraw_Window()
+
+
+    WindowShow(
+        Win,
+        true
+    )
+
+end
+
+
+--------------------------------------------------
+-- SAVE POSITION
+--------------------------------------------------
+
+function OnPluginSaveState()
+
+    movewindow.save_state(
+        Win
+    )
+
+end
+
+
+--------------------------------------------------
+-- ENABLE
+--------------------------------------------------
+
+function OnPluginEnable()
+
+    LoadTheme()
+
+    RefreshStates()
+
+    Redraw_Window()
+
+
+    WindowShow(
+        Win,
+        true
+    )
+
+end
+
+
+--------------------------------------------------
+-- DISABLE
+--------------------------------------------------
+
+function OnPluginDisable()
+
+    WindowShow(
+        Win,
+        false
+    )
+
+
+    Redraw()
+
+end
+
+
+--------------------------------------------------
+-- SHOW
+--------------------------------------------------
+
+function autobuffs_show(
+    name,
+    line,
+    wildcards
+)
+
+    windowVisible = true
+
+
+    RefreshStates()
+
+    Redraw_Window()
+
+
+    WindowShow(
+        Win,
+        true
+    )
+
+
+    ColourNote(
+        "yellow",
+        "",
+        "Autobuff tracker shown."
+    )
+
+end
+
+
+--------------------------------------------------
+-- HIDE
+--------------------------------------------------
+
+function autobuffs_hide(
+    name,
+    line,
+    wildcards
+)
+
+    windowVisible = false
+
+
+    WindowShow(
+        Win,
+        false
+    )
+
+
+    ColourNote(
+        "yellow",
+        "",
+        "Autobuff tracker hidden."
+    )
+
+end
+
+--------------------------------------------------
+-- THEME BROADCAST
+--------------------------------------------------
+
+function OnPluginBroadcast(
+    msg,
+    id,
+    name,
+    text
+)
+
+    if msg ~= THEME_BROADCAST_MESSAGE then
+        return
+    end
+
+    if id ~= THEME_CONTROLLER_ID then
+        return
+    end
+
+    LoadTheme()
+    Redraw_Window()
+end
+
+
+]]>
+</script>
+
+</muclient>

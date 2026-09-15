@@ -1,0 +1,2057 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+
+<muclient>
+
+<plugin
+    name="Travel_Alias_Window"
+    author="ChatGPT"
+    id="6a941f23b8ce4a2d9e7051bc"
+    language="Lua"
+    purpose="Shows Travel alias-group speedwalks in a themed resizable responsive clickable miniwindow"
+    date_written="2026-09-07"
+    version="2.0"
+    save_state="y"
+>
+
+<description trim="y">
+<![CDATA[
+TRAVEL ALIAS WINDOW
+
+Automatically lists WORLD aliases whose group is exactly:
+
+    travel
+
+Each destination is clickable and executes the corresponding alias command.
+
+Commands:
+
+    travelwin show
+    travelwin hide
+    travelwin refresh
+
+Mouse wheel over the list to scroll.
+
+Drag the lower-right corner to resize. The list automatically adds or removes
+columns with width and visible rows with height.
+
+The window follows the shared themes:
+
+    theme default
+    theme classic
+    theme amber
+]]>
+
+Modular theme client: colours are supplied by UI_Theme_Controller v2.0 when available.
+</description>
+
+</plugin>
+
+
+<aliases>
+
+    <alias
+        name="TravelWindow_Show"
+        script="travelwin_show"
+        match="^travelwin show$"
+        regexp="y"
+        ignore_case="y"
+        enabled="y"
+        sequence="100"
+    ></alias>
+
+    <alias
+        name="TravelWindow_Hide"
+        script="travelwin_hide"
+        match="^travelwin hide$"
+        regexp="y"
+        ignore_case="y"
+        enabled="y"
+        sequence="100"
+    ></alias>
+
+    <alias
+        name="TravelWindow_Refresh"
+        script="travelwin_refresh"
+        match="^travelwin refresh$"
+        regexp="y"
+        ignore_case="y"
+        enabled="y"
+        sequence="100"
+    ></alias>
+
+</aliases>
+
+
+<timers>
+
+    <timer
+        name="TravelWindow_AutoRefresh"
+        second="2"
+        enabled="y"
+        script="AutoRefreshAliases"
+    ></timer>
+
+</timers>
+
+
+<script>
+<![CDATA[
+
+require "movewindow"
+
+Win = GetPluginID()
+
+
+--------------------------------------------------
+-- CONFIGURATION
+--------------------------------------------------
+
+TRAVEL_GROUP = "travel"
+
+DEFAULT_WINDOW_WIDTH = 195
+DEFAULT_WINDOW_HEIGHT = 193
+MIN_WINDOW_WIDTH = 130
+MIN_WINDOW_HEIGHT = 118
+
+TITLE_HEIGHT = 22
+ROW_HEIGHT = 24
+
+SCROLL_WIDTH = 15
+SCROLL_BUTTON_HEIGHT = 15
+
+-- Responsive grid: the historical 195 px window still resolves to two columns.
+-- Wider windows gain columns; narrower windows collapse to one.
+MIN_COLUMN_WIDTH = 76
+MAX_COLUMNS = 8
+COLUMN_GAP = 8
+
+RESIZE_GRIP_SIZE = 12
+
+WINDOW_WIDTH = math.max(
+    MIN_WINDOW_WIDTH,
+    tonumber(GetVariable("travel_window_width")) or DEFAULT_WINDOW_WIDTH
+)
+
+WINDOW_HEIGHT = math.max(
+    MIN_WINDOW_HEIGHT,
+    tonumber(GetVariable("travel_window_height")) or DEFAULT_WINDOW_HEIGHT
+)
+
+TELEPORT_HEIGHT = ROW_HEIGHT * 2
+
+TEXT_INSET = 9
+
+FONT_NAME = "Lucida Console"
+BODY_FONT_SIZE = 10
+TITLE_FONT_SIZE = 9
+
+
+--------------------------------------------------
+-- SHARED UI THEMES
+--------------------------------------------------
+
+THEME_CONTROLLER_ID =
+    "43c8d047be7a418ba5e86916"
+
+THEME_BROADCAST_MESSAGE = 9042
+
+
+--------------------------------------------------
+-- MODULAR THEME CLIENT
+--
+-- The controller owns the real palette. The local THEMES table
+-- below is retained only as a safe fallback if the controller
+-- is unavailable.
+--------------------------------------------------
+
+local THEME_PROFILE =
+    "travel"
+
+
+function ThemeColour(
+    role,
+    fallback
+)
+
+    local rc,
+          value =
+        CallPlugin(
+            THEME_CONTROLLER_ID,
+            "GetThemeColour",
+            THEME_PROFILE,
+            role
+        )
+
+
+    if rc ==
+       error_code.eOK and
+       type(
+           value
+       ) ==
+       "string" and
+       value ~=
+       ""
+    then
+
+        return
+            ColourNameToRGB(
+                value
+            )
+
+    end
+
+
+    return
+        ColourNameToRGB(
+            fallback
+        )
+end
+
+
+THEMES = {
+
+    classic = {
+        background = "#000000",
+        border = "#808080",
+        title_bar = "darkslategray",
+        title = "gold",
+
+        text = "#D4D0C8",
+        dim = "#707070",
+
+        row_hover = "#202020",
+        separator = "#282828",
+
+        scroll_track = "#101010",
+        scroll_thumb = "#606060",
+        scroll_arrow = "#D4D0C8"
+    },
+
+    amber = {
+        background = "#050301",
+        border = "#6B3D18",
+        title_bar = "#160B03",
+        title = "#FFB347",
+
+        text = "#E38B30",
+        dim = "#6B3D18",
+
+        row_hover = "#241205",
+        separator = "#2D1809",
+
+        scroll_track = "#0C0602",
+        scroll_thumb = "#7A4318",
+        scroll_arrow = "#FFB347"
+    },
+
+    default = {
+        background = "#000500",
+        border = "#285B28",
+        title_bar = "#061306",
+        title = "#9AFF82",
+
+        text = "#70D970",
+        dim = "#285328",
+
+        row_hover = "#0A1C0A",
+        separator = "#102A10",
+
+        scroll_track = "#000A00",
+        scroll_thumb = "#2E6B2E",
+        scroll_arrow = "#9AFF82"
+    }
+}
+
+
+function LoadTheme()
+
+    local themeName =
+        GetPluginVariable(
+            THEME_CONTROLLER_ID,
+            "theme"
+        )
+
+    if not THEMES[themeName] then
+        themeName = "default"
+    end
+
+    local T = THEMES[themeName]
+
+    C_BACKGROUND =
+        ThemeColour("background", T.background)
+
+    C_BORDER =
+        ThemeColour("border", T.border)
+
+    C_TITLE_BAR =
+        ThemeColour("title_bar", T.title_bar)
+
+    C_TITLE =
+        ThemeColour("title", T.title)
+
+    C_TEXT =
+        ThemeColour("text", T.text)
+
+    C_DIM =
+        ThemeColour("dim", T.dim)
+
+    C_ROW_HOVER =
+        ThemeColour("row_hover", T.row_hover)
+
+    C_SEPARATOR =
+        ThemeColour("separator", T.separator)
+
+    C_SCROLL_TRACK =
+        ThemeColour("scroll_track", T.scroll_track)
+
+    C_SCROLL_THUMB =
+        ThemeColour("scroll_thumb", T.scroll_thumb)
+
+    C_SCROLL_ARROW =
+        ThemeColour("scroll_arrow", T.scroll_arrow)
+end
+
+LoadTheme()
+
+
+--------------------------------------------------
+-- STATE
+--------------------------------------------------
+
+windowinfo = ""
+
+travelAliases = {}
+
+scrollOffset = 0
+
+hoverIndex = nil
+
+windowVisible = true
+
+lastAliasSignature = ""
+
+resizeActive = false
+
+-- Track only the grid hotspots that existed on the previous frame.  Seed with
+-- the legacy 2 x 30 geometry so reloading over v1.6 cleans up old hotspots once.
+lastGridRows = 30
+lastGridColumns = 2
+
+
+--------------------------------------------------
+-- HELPERS
+--------------------------------------------------
+
+function CurrentColumnCount()
+
+    local listRight =
+        WINDOW_WIDTH -
+        SCROLL_WIDTH
+
+    local usableWidth =
+        math.max(
+            1,
+            listRight -
+            (TEXT_INSET * 2)
+        )
+
+    local columns =
+        math.floor(
+            (usableWidth + COLUMN_GAP) /
+            (MIN_COLUMN_WIDTH + COLUMN_GAP)
+        )
+
+    columns =
+        math.max(
+            1,
+            math.min(
+                MAX_COLUMNS,
+                columns
+            )
+        )
+
+    -- Do not manufacture empty columns when only a few destinations exist.
+    if #travelAliases > 0 then
+        columns =
+            math.min(
+                columns,
+                #travelAliases
+            )
+    end
+
+    return columns
+end
+
+
+function VisibleRowCount()
+
+    return math.max(
+        1,
+        math.floor(
+            (
+                WINDOW_HEIGHT -
+                TITLE_HEIGHT -
+                TELEPORT_HEIGHT
+            ) /
+            ROW_HEIGHT
+        )
+    )
+end
+
+
+function TotalLogicalRows()
+
+    local columnCount =
+        CurrentColumnCount()
+
+    return
+        math.ceil(
+            #travelAliases /
+            columnCount
+        )
+end
+
+
+function MaxScrollOffset()
+
+    return math.max(
+        0,
+        TotalLogicalRows() -
+        VisibleRowCount()
+    )
+end
+
+
+function ClampScroll()
+
+    scrollOffset =
+        math.max(
+            0,
+            math.min(
+                scrollOffset,
+                MaxScrollOffset()
+            )
+        )
+end
+
+
+--------------------------------------------------
+-- TURN A SIMPLE ALIAS MATCH INTO THE COMMAND
+--
+-- Common Travel aliases are usually exact literal aliases,
+-- sometimes stored as regexp forms such as ^midgar$.
+--------------------------------------------------
+
+function CommandFromMatch(
+    matchText,
+    isRegexp
+)
+
+    if not matchText then
+        return nil
+    end
+
+    local command =
+        matchText
+
+    if isRegexp then
+
+        command =
+            command:gsub(
+                "^%^",
+                ""
+            )
+
+        command =
+            command:gsub(
+                "%$$",
+                ""
+            )
+
+        --------------------------------------------------
+        -- Unescape punctuation commonly escaped in exact
+        -- regexp aliases. This is intentionally conservative.
+        --------------------------------------------------
+
+        command =
+            command:gsub(
+                "\\([%-%._ ])",
+                "%1"
+            )
+    end
+
+    return command
+end
+
+
+function DisplayNameFromCommand(command)
+
+    if not command or
+       command == ""
+    then
+
+        return "(unnamed)"
+    end
+
+    return command
+end
+
+
+--------------------------------------------------
+-- READ TRAVEL ALIASES
+--
+-- Sources:
+--   1) ordinary world-level aliases in group "travel"
+--   2) Automapper-owned persistent map bookmarks in group "travel"
+--
+-- Both are invoked by Execute(command), so the UI behaves identically.
+--------------------------------------------------
+
+AUTOMAPPER_PLUGIN_ID = "a7c3e91b4d6f2085c1e73a9d"
+
+function AppendTravelAliases(found, seen, pluginId)
+
+    local aliasList = GetPluginAliasList(pluginId)
+    if type(aliasList) ~= "table" then return end
+
+    for _, aliasName in pairs(aliasList) do
+        local group = GetPluginAliasInfo(pluginId, aliasName, 16)
+        if group == TRAVEL_GROUP then
+            local matchText = GetPluginAliasInfo(pluginId, aliasName, 1)
+            local enabled = GetPluginAliasInfo(pluginId, aliasName, 6)
+            local isRegexp = GetPluginAliasInfo(pluginId, aliasName, 7)
+            local command = CommandFromMatch(matchText, isRegexp == true)
+
+            if command and command ~= "" then
+                local key = command:lower()
+                if not seen[key] then
+                    seen[key] = true
+                    table.insert(found, {
+                        aliasName = aliasName,
+                        command = command,
+                        display = DisplayNameFromCommand(command),
+                        enabled = enabled ~= false,
+                        sourcePlugin = pluginId
+                    })
+                end
+            end
+        end
+    end
+end
+
+function LoadTravelAliases()
+
+    local found = {}
+    local seen = {}
+
+    -- Preserve existing behaviour and precedence for manually-created aliases.
+    AppendTravelAliases(found, seen, "")
+    AppendTravelAliases(found, seen, AUTOMAPPER_PLUGIN_ID)
+
+    table.sort(
+        found,
+        function(a,b)
+
+            return
+                a.display:lower() <
+                b.display:lower()
+        end
+    )
+
+
+    travelAliases =
+        found
+
+
+    ClampScroll()
+end
+
+
+function AliasSignature()
+
+    local parts = {}
+
+    for _, item in ipairs(
+        travelAliases
+    ) do
+
+        table.insert(
+            parts,
+            item.aliasName ..
+            "|" ..
+            item.command ..
+            "|" ..
+            tostring(item.enabled)
+        )
+
+    end
+
+    return
+        table.concat(
+            parts,
+            "\n"
+        )
+end
+
+
+--------------------------------------------------
+-- HOTSPOTS
+--------------------------------------------------
+
+function ClearDynamicHotspots()
+
+    --------------------------------------------------
+    -- Rows
+    --------------------------------------------------
+
+    for row = 1, lastGridRows do
+
+        for column = 1, lastGridColumns do
+
+            WindowDeleteHotspot(
+                Win,
+                "travel_row_" ..
+                tostring(row) ..
+                "_" ..
+                tostring(column)
+            )
+
+        end
+
+    end
+
+
+    WindowDeleteHotspot(
+        Win,
+        "travel_scroll_up"
+    )
+
+    WindowDeleteHotspot(
+        Win,
+        "travel_scroll_down"
+    )
+
+    WindowDeleteHotspot(
+        Win,
+        "travel_scroll_area"
+    )
+
+    WindowDeleteHotspot(
+        Win,
+        "travel_teleport"
+    )
+
+    WindowDeleteHotspot(
+        Win,
+        "travel_resize"
+    )
+end
+
+
+function IndexFromHotspot(
+    hotspot_id
+)
+
+    local row,
+          column =
+        hotspot_id:match(
+            "^travel_row_(%d+)_(%d+)$"
+        )
+
+
+    row =
+        tonumber(row)
+
+    column =
+        tonumber(column)
+
+
+    if not row or
+       not column
+    then
+
+        return nil
+    end
+
+
+    local columnCount =
+        CurrentColumnCount()
+
+    if column > columnCount then
+        return nil
+    end
+
+    return
+        (
+            scrollOffset *
+            columnCount
+        ) +
+        (
+            (row - 1) *
+            columnCount
+        ) +
+        column
+end
+
+
+function ClickTravelRow(
+    flags,
+    hotspot_id
+)
+
+    local actualIndex =
+        IndexFromHotspot(
+            hotspot_id
+        )
+
+
+    if not actualIndex then
+        return
+    end
+
+
+    local item =
+        travelAliases[
+            actualIndex
+        ]
+
+
+    if not item or
+       not item.enabled
+    then
+
+        return
+    end
+
+
+    Execute(
+        item.command
+    )
+end
+
+
+function HoverTravelRow(
+    flags,
+    hotspot_id
+)
+
+    local actualIndex =
+        IndexFromHotspot(
+            hotspot_id
+        )
+
+
+    if not actualIndex then
+        return
+    end
+
+
+    hoverIndex =
+        actualIndex
+
+
+    DrawWindow()
+end
+
+
+function LeaveTravelRow(
+    flags,
+    hotspot_id
+)
+
+    hoverIndex =
+        nil
+
+    DrawWindow()
+end
+
+
+function ClickTeleport(
+    flags,
+    hotspot_id
+)
+
+    Send("teleport")
+end
+
+
+function ScrollUp(
+    flags,
+    hotspot_id
+)
+
+    scrollOffset =
+        scrollOffset -
+        1
+
+    ClampScroll()
+
+    DrawWindow()
+end
+
+
+function ScrollDown(
+    flags,
+    hotspot_id
+)
+
+    scrollOffset =
+        scrollOffset +
+        1
+
+    ClampScroll()
+
+    DrawWindow()
+end
+
+
+function ScrollWheel(
+    flags,
+    hotspot_id
+)
+
+    local amount = 3
+
+    if flags > 0 then
+
+        scrollOffset =
+            scrollOffset +
+            amount
+
+    else
+
+        scrollOffset =
+            scrollOffset -
+            amount
+
+    end
+
+
+    ClampScroll()
+
+    DrawWindow()
+end
+
+
+--------------------------------------------------
+-- RESIZE + RESPONSIVE GRID
+--------------------------------------------------
+
+function SaveTravelWindowSize()
+
+    SetVariable(
+        "travel_window_width",
+        tostring(math.floor(WINDOW_WIDTH))
+    )
+
+    SetVariable(
+        "travel_window_height",
+        tostring(math.floor(WINDOW_HEIGHT))
+    )
+end
+
+
+function TravelResizeMouseDown(
+    flags,
+    hotspot_id
+)
+
+    resizeActive = true
+    return 0
+end
+
+
+function UpdateTravelResizeFromMouse()
+
+    local mx =
+        tonumber(WindowInfo(Win, 17))
+
+    local my =
+        tonumber(WindowInfo(Win, 18))
+
+    local left =
+        tonumber(WindowInfo(Win, 10)) or
+        tonumber(WindowInfo(Win, 1)) or
+        0
+
+    local top =
+        tonumber(WindowInfo(Win, 11)) or
+        tonumber(WindowInfo(Win, 2)) or
+        0
+
+    if not mx or
+       not my
+    then
+        return false
+    end
+
+    local width =
+        math.max(
+            MIN_WINDOW_WIDTH,
+            math.floor(mx - left + 1)
+        )
+
+    local height =
+        math.max(
+            MIN_WINDOW_HEIGHT,
+            math.floor(my - top + 1)
+        )
+
+    if width == WINDOW_WIDTH and
+       height == WINDOW_HEIGHT
+    then
+        return false
+    end
+
+    WINDOW_WIDTH = width
+    WINDOW_HEIGHT = height
+
+    WindowResize(
+        Win,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        C_BACKGROUND
+    )
+
+    Redraw()
+    return true
+end
+
+
+function TravelResizeMouseMove(
+    flags,
+    hotspot_id
+)
+
+    if resizeActive then
+        UpdateTravelResizeFromMouse()
+    end
+
+    SetCursor(
+        miniwin.cursor_nw_se_arrow
+    )
+
+    return 0
+end
+
+
+function TravelResizeMouseUp(
+    flags,
+    hotspot_id
+)
+
+    if resizeActive then
+        UpdateTravelResizeFromMouse()
+    end
+
+    resizeActive = false
+
+    ClampScroll()
+    SaveTravelWindowSize()
+    DrawWindow()
+
+    return 0
+end
+
+
+function InstallTravelResizeHandle()
+
+    WindowDeleteHotspot(
+        Win,
+        "travel_resize"
+    )
+
+    WindowAddHotspot(
+        Win,
+        "travel_resize",
+        WINDOW_WIDTH - RESIZE_GRIP_SIZE,
+        WINDOW_HEIGHT - RESIZE_GRIP_SIZE,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        "",
+        "",
+        "TravelResizeMouseDown",
+        "",
+        "",
+        "Drag to resize travel shortcuts",
+        miniwin.cursor_nw_se_arrow,
+        0
+    )
+
+    WindowDragHandler(
+        Win,
+        "travel_resize",
+        "TravelResizeMouseMove",
+        "TravelResizeMouseUp",
+        0
+    )
+
+    WindowLine(
+        Win,
+        WINDOW_WIDTH - 11,
+        WINDOW_HEIGHT - 3,
+        WINDOW_WIDTH - 3,
+        WINDOW_HEIGHT - 11,
+        C_BORDER,
+        miniwin.pen_solid,
+        1
+    )
+
+    WindowLine(
+        Win,
+        WINDOW_WIDTH - 7,
+        WINDOW_HEIGHT - 3,
+        WINDOW_WIDTH - 3,
+        WINDOW_HEIGHT - 7,
+        C_BORDER,
+        miniwin.pen_solid,
+        1
+    )
+end
+
+
+--------------------------------------------------
+-- SCROLLBAR
+--------------------------------------------------
+
+function DrawArrow(
+    cx,
+    cy,
+    direction
+)
+
+    local points
+
+    if direction == "up" then
+
+        points =
+            string.format(
+                "%d,%d,%d,%d,%d,%d",
+                cx - 4,
+                cy + 2,
+                cx,
+                cy - 3,
+                cx + 4,
+                cy + 2
+            )
+
+    else
+
+        points =
+            string.format(
+                "%d,%d,%d,%d,%d,%d",
+                cx - 4,
+                cy - 2,
+                cx,
+                cy + 3,
+                cx + 4,
+                cy - 2
+            )
+
+    end
+
+
+    WindowPolygon(
+        Win,
+        points,
+        C_SCROLL_ARROW,
+        miniwin.pen_solid,
+        1,
+        C_SCROLL_ARROW,
+        miniwin.brush_solid,
+        true,
+        false
+    )
+end
+
+
+function DrawScrollbar()
+
+    local left =
+        WINDOW_WIDTH -
+        SCROLL_WIDTH
+
+
+    local trackTop =
+        TITLE_HEIGHT +
+        SCROLL_BUTTON_HEIGHT
+
+
+    local trackBottom =
+        WINDOW_HEIGHT -
+        RESIZE_GRIP_SIZE -
+        SCROLL_BUTTON_HEIGHT
+
+
+    WindowRectOp(
+        Win,
+        miniwin.rect_fill,
+        left,
+        TITLE_HEIGHT,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        C_SCROLL_TRACK
+    )
+
+
+    --------------------------------------------------
+    -- Buttons
+    --------------------------------------------------
+
+    WindowRectOp(
+        Win,
+        miniwin.rect_frame,
+        left,
+        TITLE_HEIGHT,
+        WINDOW_WIDTH,
+        TITLE_HEIGHT +
+        SCROLL_BUTTON_HEIGHT,
+        C_BORDER
+    )
+
+
+    WindowRectOp(
+        Win,
+        miniwin.rect_frame,
+        left,
+        WINDOW_HEIGHT -
+        RESIZE_GRIP_SIZE -
+        SCROLL_BUTTON_HEIGHT,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT -
+        RESIZE_GRIP_SIZE,
+        C_BORDER
+    )
+
+
+    DrawArrow(
+        left +
+        math.floor(
+            SCROLL_WIDTH /
+            2
+        ),
+        TITLE_HEIGHT +
+        math.floor(
+            SCROLL_BUTTON_HEIGHT /
+            2
+        ),
+        "up"
+    )
+
+
+    DrawArrow(
+        left +
+        math.floor(
+            SCROLL_WIDTH /
+            2
+        ),
+        WINDOW_HEIGHT -
+        RESIZE_GRIP_SIZE -
+        math.floor(
+            SCROLL_BUTTON_HEIGHT /
+            2
+        ),
+        "down"
+    )
+
+
+    --------------------------------------------------
+    -- Thumb
+    --------------------------------------------------
+
+    local trackHeight =
+        trackBottom -
+        trackTop
+
+
+    local visibleRows =
+        VisibleRowCount()
+
+
+    local totalRows =
+        math.max(
+            TotalLogicalRows(),
+            visibleRows
+        )
+
+
+    local thumbHeight =
+        math.max(
+            18,
+            math.floor(
+                trackHeight *
+                visibleRows /
+                totalRows
+            )
+        )
+
+
+    local maxOffset =
+        MaxScrollOffset()
+
+
+    local thumbTop =
+        trackTop
+
+
+    if maxOffset > 0 then
+
+        thumbTop =
+            trackTop +
+            math.floor(
+                (
+                    trackHeight -
+                    thumbHeight
+                ) *
+                scrollOffset /
+                maxOffset
+            )
+    end
+
+
+    WindowRectOp(
+        Win,
+        miniwin.rect_fill,
+        left + 3,
+        thumbTop,
+        WINDOW_WIDTH - 3,
+        thumbTop + thumbHeight,
+        C_SCROLL_THUMB
+    )
+
+
+    --------------------------------------------------
+    -- Scroll hotspots
+    --------------------------------------------------
+
+    WindowAddHotspot(
+        Win,
+        "travel_scroll_up",
+        left,
+        TITLE_HEIGHT,
+        WINDOW_WIDTH,
+        TITLE_HEIGHT +
+        SCROLL_BUTTON_HEIGHT,
+        "",
+        "",
+        "",
+        "",
+        "ScrollUp",
+        "Scroll up",
+        miniwin.cursor_hand,
+        0
+    )
+
+
+    WindowAddHotspot(
+        Win,
+        "travel_scroll_down",
+        left,
+        WINDOW_HEIGHT -
+        RESIZE_GRIP_SIZE -
+        SCROLL_BUTTON_HEIGHT,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT -
+        RESIZE_GRIP_SIZE,
+        "",
+        "",
+        "",
+        "",
+        "ScrollDown",
+        "Scroll down",
+        miniwin.cursor_hand,
+        0
+    )
+
+
+    WindowAddHotspot(
+        Win,
+        "travel_scroll_area",
+        left,
+        trackTop,
+        WINDOW_WIDTH,
+        trackBottom,
+        "",
+        "",
+        "",
+        "",
+        "",
+        "Mouse wheel to scroll",
+        miniwin.cursor_arrow,
+        0
+    )
+
+
+    WindowScrollwheelHandler(
+        Win,
+        "travel_scroll_area",
+        "ScrollWheel"
+    )
+end
+
+
+--------------------------------------------------
+-- DRAW WINDOW
+--------------------------------------------------
+
+function DrawWindow()
+
+    if not windowinfo then
+        return
+    end
+
+
+    ClearDynamicHotspots()
+
+
+    WindowRectOp(
+        Win,
+        miniwin.rect_fill,
+        0,
+        0,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        C_BACKGROUND
+    )
+
+
+    --------------------------------------------------
+    -- Title bar
+    --------------------------------------------------
+
+    WindowRectOp(
+        Win,
+        miniwin.rect_fill,
+        0,
+        0,
+        WINDOW_WIDTH,
+        TITLE_HEIGHT,
+        C_TITLE_BAR
+    )
+
+
+    WindowLine(
+        Win,
+        0,
+        TITLE_HEIGHT - 1,
+        WINDOW_WIDTH,
+        TITLE_HEIGHT - 1,
+        C_BORDER,
+        miniwin.pen_solid,
+        1
+    )
+
+
+    WindowText(
+        Win,
+        "title"..Win,
+        "TRAVEL",
+        TEXT_INSET,
+        4,
+        WINDOW_WIDTH -
+        SCROLL_WIDTH,
+        TITLE_HEIGHT,
+        C_TITLE,
+        false
+    )
+
+
+    --------------------------------------------------
+    -- TELEPORT BUTTON
+    -- Full two-column width and two normal rows tall.
+    --------------------------------------------------
+
+    local buttonLeft =
+        TEXT_INSET
+
+    local buttonTop =
+        TITLE_HEIGHT + 5
+
+    local buttonRight =
+        WINDOW_WIDTH -
+        SCROLL_WIDTH -
+        TEXT_INSET
+
+    local buttonBottom =
+        buttonTop +
+        TELEPORT_HEIGHT -
+        6
+
+
+    WindowRectOp(
+        Win,
+        miniwin.rect_fill,
+        buttonLeft,
+        buttonTop,
+        buttonRight,
+        buttonBottom,
+        C_ROW_HOVER
+    )
+
+
+    WindowRectOp(
+        Win,
+        miniwin.rect_frame,
+        buttonLeft,
+        buttonTop,
+        buttonRight,
+        buttonBottom,
+        C_BORDER
+    )
+
+
+    local teleportTextWidth =
+        WindowTextWidth(
+            Win,
+            "title"..Win,
+            "Teleport"
+        )
+
+
+    WindowText(
+        Win,
+        "title"..Win,
+        "Teleport",
+        math.floor(
+            (
+                buttonLeft +
+                buttonRight -
+                teleportTextWidth
+            ) /
+            2
+        ),
+        buttonTop +
+        math.floor(
+            (
+                buttonBottom -
+                buttonTop -
+                ROW_HEIGHT
+            ) /
+            2
+        ) +
+        4,
+        buttonRight,
+        buttonBottom,
+        C_TITLE,
+        false
+    )
+
+
+    WindowAddHotspot(
+        Win,
+        "travel_teleport",
+        buttonLeft,
+        buttonTop,
+        buttonRight,
+        buttonBottom,
+        "",
+        "",
+        "",
+        "",
+        "ClickTeleport",
+        "Teleport",
+        miniwin.cursor_hand,
+        0
+    )
+
+
+    WindowScrollwheelHandler(
+        Win,
+        "travel_teleport",
+        "ScrollWheel"
+    )
+
+
+    --------------------------------------------------
+    -- Rows: responsive columns
+    --------------------------------------------------
+
+    local visibleRows =
+        VisibleRowCount()
+
+
+    local columnCount =
+        CurrentColumnCount()
+
+
+    local listRight =
+        WINDOW_WIDTH -
+        SCROLL_WIDTH
+
+
+    local usableWidth =
+        listRight -
+        (TEXT_INSET * 2)
+
+
+    local columnWidth =
+        math.floor(
+            (
+                usableWidth -
+                ((columnCount - 1) * COLUMN_GAP)
+            ) /
+            columnCount
+        )
+
+
+    for visibleRow = 1,
+        visibleRows
+    do
+
+        local top =
+            TITLE_HEIGHT +
+            TELEPORT_HEIGHT +
+            (
+                (visibleRow - 1) *
+                ROW_HEIGHT
+            )
+
+
+        local bottom =
+            top +
+            ROW_HEIGHT
+
+
+        for column = 1,
+            columnCount
+        do
+
+            local actualIndex =
+                (
+                    scrollOffset *
+                    columnCount
+                ) +
+                (
+                    (visibleRow - 1) *
+                    columnCount
+                ) +
+                column
+
+
+            local item =
+                travelAliases[
+                    actualIndex
+                ]
+
+
+            if item then
+
+                local left =
+                    TEXT_INSET +
+                    (
+                        (column - 1) *
+                        (
+                            columnWidth +
+                            COLUMN_GAP
+                        )
+                    )
+
+
+                local right =
+                    left +
+                    columnWidth
+
+
+                local textColour =
+                    item.enabled
+                    and C_TEXT
+                    or C_DIM
+
+
+                WindowText(
+                    Win,
+                    "body"..Win,
+                    item.display,
+                    left,
+                    top + 5,
+                    right - 2,
+                    bottom,
+                    textColour,
+                    false
+                )
+
+
+                local hotspot_id =
+                    "travel_row_" ..
+                    tostring(
+                        visibleRow
+                    ) ..
+                    "_" ..
+                    tostring(
+                        column
+                    )
+
+
+                WindowAddHotspot(
+                    Win,
+                    hotspot_id,
+                    left - 3,
+                    top,
+                    right + 1,
+                    bottom,
+                    "",
+                    "",
+                    "",
+                    "",
+                    "ClickTravelRow",
+                    item.enabled
+                        and
+                        ("Travel: " .. item.command)
+                        or
+                        ("Disabled alias: " .. item.command),
+                    item.enabled
+                        and miniwin.cursor_hand
+                        or miniwin.cursor_arrow,
+                    0
+                )
+
+
+                WindowScrollwheelHandler(
+                    Win,
+                    hotspot_id,
+                    "ScrollWheel"
+                )
+
+            end
+
+        end
+
+
+        if visibleRow <
+           visibleRows
+        then
+
+            WindowLine(
+                Win,
+                TEXT_INSET,
+                bottom - 1,
+                listRight - 4,
+                bottom - 1,
+                C_SEPARATOR,
+                miniwin.pen_solid,
+                1
+            )
+
+        end
+
+    end
+
+
+    lastGridRows = visibleRows
+    lastGridColumns = columnCount
+
+
+    --------------------------------------------------
+    -- Column dividers
+    --------------------------------------------------
+
+    for column = 1,
+        columnCount - 1
+    do
+
+        local dividerX =
+            TEXT_INSET +
+            (column * columnWidth) +
+            ((column - 1) * COLUMN_GAP) +
+            math.floor(
+                COLUMN_GAP /
+                2
+            )
+
+
+        WindowLine(
+            Win,
+            dividerX,
+            TITLE_HEIGHT + TELEPORT_HEIGHT + 4,
+            dividerX,
+            WINDOW_HEIGHT - 4,
+            C_SEPARATOR,
+            miniwin.pen_solid,
+            1
+        )
+
+    end
+
+
+    --------------------------------------------------
+    -- Empty state
+    --------------------------------------------------
+
+    if #travelAliases == 0 then
+
+        WindowText(
+            Win,
+            "body"..Win,
+            "No aliases in group travel.",
+            TEXT_INSET,
+            TITLE_HEIGHT + TELEPORT_HEIGHT + 10,
+            WINDOW_WIDTH -
+            SCROLL_WIDTH - 5,
+            0,
+            C_DIM,
+            false
+        )
+
+    end
+
+
+    DrawScrollbar()
+
+
+    -- Reinstall move/resize geometry after every responsive layout change.
+    movewindow.add_drag_handler(
+        Win,
+        0,
+        0,
+        WINDOW_WIDTH,
+        TITLE_HEIGHT
+    )
+
+    InstallTravelResizeHandle()
+
+
+    --------------------------------------------------
+    -- Border
+    --------------------------------------------------
+
+    WindowRectOp(
+        Win,
+        miniwin.rect_frame,
+        0,
+        0,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        C_BORDER
+    )
+
+
+    Redraw()
+end
+
+
+--------------------------------------------------
+-- REFRESH
+--------------------------------------------------
+
+function RefreshAliases()
+
+    LoadTravelAliases()
+
+    lastAliasSignature =
+        AliasSignature()
+
+    DrawWindow()
+end
+
+
+function AutoRefreshAliases()
+
+    -- Never mutate hotspots while MUSHclient is dispatching the resize drag.
+    if resizeActive then
+        return
+    end
+
+    local oldSignature =
+        lastAliasSignature
+
+
+    LoadTravelAliases()
+
+
+    local newSignature =
+        AliasSignature()
+
+
+    if newSignature ~=
+       oldSignature
+    then
+
+        lastAliasSignature =
+            newSignature
+
+        DrawWindow()
+    end
+end
+
+
+--------------------------------------------------
+-- INSTALL
+--------------------------------------------------
+
+function OnPluginInstall()
+
+    LoadTheme()
+
+
+    check(
+        WindowCreate(
+            Win,
+            0,
+            0,
+            WINDOW_WIDTH,
+            WINDOW_HEIGHT,
+            0,
+            0,
+            C_BACKGROUND
+        )
+    )
+
+
+    check(
+        WindowFont(
+            Win,
+            "body"..Win,
+            FONT_NAME,
+            BODY_FONT_SIZE
+        )
+    )
+
+
+    check(
+        WindowFont(
+            Win,
+            "title"..Win,
+            FONT_NAME,
+            TITLE_FONT_SIZE,
+            true
+        )
+    )
+
+
+    windowinfo =
+        movewindow.install(
+            Win,
+            miniwin.pos_top_right,
+            miniwin.create_absolute_location,
+            true
+        )
+
+
+    check(
+        WindowCreate(
+            Win,
+            windowinfo.window_left,
+            windowinfo.window_top,
+            WINDOW_WIDTH,
+            WINDOW_HEIGHT,
+            windowinfo.window_mode,
+            windowinfo.window_flags,
+            C_BACKGROUND
+        )
+    )
+
+
+    movewindow.add_drag_handler(
+        Win,
+        0,
+        0,
+        WINDOW_WIDTH,
+        TITLE_HEIGHT
+    )
+
+
+    RefreshAliases()
+
+
+    WindowShow(
+        Win,
+        true
+    )
+end
+
+
+--------------------------------------------------
+-- SAVE STATE
+--------------------------------------------------
+
+function OnPluginSaveState()
+
+    SaveTravelWindowSize()
+
+    movewindow.save_state(
+        Win
+    )
+
+end
+
+
+--------------------------------------------------
+-- ENABLE / DISABLE
+--------------------------------------------------
+
+function OnPluginEnable()
+
+    LoadTheme()
+
+    RefreshAliases()
+
+    WindowShow(
+        Win,
+        true
+    )
+end
+
+
+function OnPluginDisable()
+
+    WindowShow(
+        Win,
+        false
+    )
+end
+
+
+--------------------------------------------------
+-- COMMANDS
+--------------------------------------------------
+
+function travelwin_show(
+    name,
+    line,
+    wildcards
+)
+
+    windowVisible = true
+
+    RefreshAliases()
+
+    WindowShow(
+        Win,
+        true
+    )
+
+
+    ColourNote(
+        "yellow",
+        "",
+        "Travel window shown."
+    )
+end
+
+
+function travelwin_hide(
+    name,
+    line,
+    wildcards
+)
+
+    windowVisible = false
+
+    WindowShow(
+        Win,
+        false
+    )
+
+
+    ColourNote(
+        "yellow",
+        "",
+        "Travel window hidden."
+    )
+end
+
+
+function travelwin_refresh(
+    name,
+    line,
+    wildcards
+)
+
+    RefreshAliases()
+
+
+    ColourNote(
+        "yellow",
+        "",
+        "Travel aliases refreshed (" ..
+        tostring(
+            #travelAliases
+        ) ..
+        " found)."
+    )
+end
+
+
+--------------------------------------------------
+-- THEME BROADCAST
+--------------------------------------------------
+
+function OnPluginBroadcast(
+    msg,
+    id,
+    name,
+    text
+)
+
+    if msg ~= THEME_BROADCAST_MESSAGE then
+        return
+    end
+
+    if id ~= THEME_CONTROLLER_ID then
+        return
+    end
+
+    LoadTheme()
+
+    DrawWindow()
+end
+
+
+
+
+--------------------------------------------------
+-- PLUGIN CONTROLLER LAYOUT API
+--------------------------------------------------
+
+function ManagedLayoutParse(spec)
+    local windowName, sx, sy, sw, sh =
+        tostring(spec or ""):match("^([^\t]+)\t(-?%d+)\t(-?%d+)\t(%d+)\t(%d+)$")
+    if not windowName then return nil end
+    return windowName, tonumber(sx), tonumber(sy), tonumber(sw), tonumber(sh)
+end
+
+function ManagedLayoutSetMoveWindowInfo(info, winName, x, y)
+    if type(info) ~= "table" then return end
+    info.window_left = x
+    info.window_top = y
+    info.window_mode = tonumber(WindowInfo(winName, 7)) or info.window_mode or miniwin.pos_top_left
+    info.window_flags = tonumber(WindowInfo(winName, 8)) or info.window_flags or miniwin.create_absolute_location
+end
+
+function GetManagedLayoutWindows()
+    return Win
+end
+
+function ApplyManagedLayout(spec)
+    local windowName, x, y, w, h = ManagedLayoutParse(spec)
+    if windowName ~= Win then return "wrong window" end
+
+    WINDOW_WIDTH = math.max(MIN_WINDOW_WIDTH, math.floor(w))
+    WINDOW_HEIGHT = math.max(MIN_WINDOW_HEIGHT, math.floor(h))
+    SaveTravelWindowSize()
+    ClampScroll()
+
+    WindowResize(
+        Win,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        C_BACKGROUND
+    )
+
+    ManagedLayoutSetMoveWindowInfo(windowinfo, Win, x, y)
+    DrawWindow()
+
+    local mode = type(windowinfo) == "table" and windowinfo.window_mode or miniwin.pos_top_left
+    local flags = type(windowinfo) == "table" and windowinfo.window_flags or miniwin.create_absolute_location
+    WindowPosition(Win, x, y, mode, flags)
+    if movewindow then movewindow.save_state(Win) end
+    pcall(SaveState)
+    Redraw()
+    return "ok"
+end
+
+]]>
+</script>
+
+</muclient>

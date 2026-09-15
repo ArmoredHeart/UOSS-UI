@@ -1,0 +1,999 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+<muclient>
+
+<plugin
+    name="SquareSoft_Plugin_Controller"
+    author="OpenAI"
+    id="5f2a91c7d3e84b60a1c9e742"
+    language="Lua"
+    purpose="Central controller for SquareSoft miniwindow plugin layout save/load"
+    date_written="2026-09-14"
+    requires="4.58"
+    version="1.5"
+    save_state="y"
+>
+
+<description trim="y">
+<![CDATA[
+SQUARESOFT PLUGIN CONTROLLER v1.5
+
+IMPORTANT:
+v1.0 used broad WindowList()/owner discovery as a compatibility fallback.
+That path has been removed completely because it can destabilize MUSHclient
+when complex plugins are actively creating/repainting helper miniwindows.
+
+v1.1 only touches:
+  * plugins which explicitly expose the SquareSoft managed-layout API
+  * the known Generic_Chat_Miniwindow adapter
+
+Commands:
+  layout save
+  layout load              - monitor-scaled restore (default)
+  layout load exact        - raw pixel-for-pixel restore
+  layout path
+  layout save NAME
+  layout load NAME
+  layout inspect
+  layout scale
+  ui plugins
+
+Default file:
+  SquareSoft_UI_Layout.txt
+]]>
+</description>
+</plugin>
+
+<aliases>
+  <alias name="PluginController_LayoutSave"
+         script="LayoutSaveAlias"
+         match="^(?:ui\s+)?layout\s+save(?:\s+([A-Za-z0-9_-]+))?$"
+         regexp="y" ignore_case="y" enabled="y" sequence="10"></alias>
+
+  <alias name="PluginController_LayoutLoad"
+         script="LayoutLoadAlias"
+         match="^(?:ui\s+)?layout\s+load(?:\s+([A-Za-z0-9_-]+))?$"
+         regexp="y" ignore_case="y" enabled="y" sequence="10"></alias>
+
+  <alias name="PluginController_LayoutPath"
+         script="LayoutPathAlias"
+         match="^(?:ui\s+)?layout\s+path$"
+         regexp="y" ignore_case="y" enabled="y" sequence="10"></alias>
+
+  <alias name="PluginController_LayoutInspect"
+         script="LayoutInspectAlias"
+         match="^(?:ui\s+)?layout\s+inspect$"
+         regexp="y" ignore_case="y" enabled="y" sequence="10"></alias>
+
+
+  <alias name="PluginController_LayoutScale"
+         script="LayoutScaleAlias"
+         match="^(?:ui\s+)?layout\s+scale$"
+         regexp="y" ignore_case="y" enabled="y" sequence="10"></alias>
+
+  <alias name="PluginController_Status"
+         script="PluginStatusAlias"
+         match="^ui\s+plugins$"
+         regexp="y" ignore_case="y" enabled="y" sequence="10"></alias>
+</aliases>
+
+<script>
+<![CDATA[
+
+SELF_ID = GetPluginID()
+LAYOUT_FORMAT_VERSION = 2
+WINDOW_SEP = string.char(30)
+
+-- Fixed registry: no WindowList(), no WindowInfo(..., 23), no scanning arbitrary
+-- helper windows.  This is intentionally conservative for MUSHclient stability.
+MANAGED_PLUGINS = {
+    { id="91c7e4a23bf84d1aa0e9c562", name="Status Effect Tracker" },
+    { id="a1e4bf29c1a8477fa19b2201", name="XP / AP / Gold Rates" },
+    { id="a1b2c3d4e5f60718293a4b5c", name="Exit Compass" },
+    { id="6a941f23b8ce4a2d9e7051bc", name="Travel Shortcuts" },
+    { id="d47f6a92e1b83c5f0a9e2716", name="HP / MP Gauges" },
+    { id="c39d5271e8a04f6b9c418823", name="Enemy Bestiary Tracker" },
+    { id="7f3e21b0a94d4d73b87c34e2", name="World Map Window" },
+    { id="a7c3e91b4d6f2085c1e73a9d", name="SquareSoft Automapper" }
+}
+
+CHAT_PLUGIN_ID = "10778718503f0c91106745f5"
+CHAT_PLUGIN_NAME = "Generic Chat / Communication"
+
+UI_LAYOUT_CONTROLLER_ID = "7b4e91c2a6d34f0ca8e12573"
+
+-- If an older layout file does not contain gutter metadata, these are the
+-- reference gutters from the bundled 1899x968 canvas / 1920x1080 monitor preset.
+FALLBACK_GUTTER_LEFT = 390
+FALLBACK_GUTTER_RIGHT = 850
+
+-- Typography deliberately scales more gently than window geometry.
+-- A 4K desktop should not turn 9pt labels into comically huge text.
+MIN_TYPE_SCALE = 0.85
+MAX_TYPE_SCALE = 1.35
+
+function ControllerNote(colour, text)
+    ColourNote(colour or "lime", "", "[Plugin Controller] " .. tostring(text or ""))
+end
+
+function PluginDirectory()
+    local dir = tostring(GetPluginInfo(SELF_ID, 20) or "")
+    if dir == "" then return "" end
+    local last = dir:sub(-1)
+    if last ~= "\\" and last ~= "/" then dir = dir .. "\\" end
+    return dir
+end
+
+function SafeProfileName(name)
+    name = tostring(name or ""):match("^%s*(.-)%s*$") or ""
+    if name == "" then return "" end
+    return (name:gsub("[^A-Za-z0-9_-]", "_"))
+end
+
+function LayoutPath(profile)
+    local dir = PluginDirectory()
+    if dir == "" then return nil end
+    profile = SafeProfileName(profile)
+    if profile == "" then
+        return dir .. "SquareSoft_UI_Layout.txt"
+    end
+    return dir .. "SquareSoft_UI_Layout_" .. profile .. ".txt"
+end
+
+function EscapeField(value)
+    local s = tostring(value or "")
+    s = s:gsub("%%", "%%25")
+    s = s:gsub("|", "%%7C")
+    s = s:gsub("\r", "%%0D")
+    s = s:gsub("\n", "%%0A")
+    return s
+end
+
+function UnescapeField(value)
+    local s = tostring(value or "")
+    s = s:gsub("%%0A", "\n")
+    s = s:gsub("%%0D", "\r")
+    s = s:gsub("%%7[Cc]", "|")
+    s = s:gsub("%%25", "%%")
+    return s
+end
+
+function SplitPipe(line)
+    local out = {}
+    local start = 1
+    while true do
+        local p = string.find(line, "|", start, true)
+        if not p then
+            table.insert(out, line:sub(start))
+            break
+        end
+        table.insert(out, line:sub(start, p - 1))
+        start = p + 1
+    end
+    return out
+end
+
+function SplitWindowNames(text)
+    local out = {}
+    text = tostring(text or "")
+    if text == "" then return out end
+
+    local start = 1
+    while true do
+        local p = string.find(text, WINDOW_SEP, start, true)
+        if not p then
+            local item = text:sub(start)
+            if item ~= "" then table.insert(out, item) end
+            break
+        end
+
+        local item = text:sub(start, p - 1)
+        if item ~= "" then table.insert(out, item) end
+        start = p + 1
+    end
+
+    return out
+end
+
+function WindowExists(name)
+    if not name or name == "" then return false end
+    return WindowInfo(name, 3) ~= nil
+end
+
+function GetManagedWindows(pluginId)
+    if not IsPluginInstalled(pluginId) then return {} end
+    if PluginSupports(pluginId, "GetManagedLayoutWindows") ~= error_code.eOK then
+        return {}
+    end
+
+    local rc, value = CallPlugin(pluginId, "GetManagedLayoutWindows")
+    if rc ~= error_code.eOK then return {} end
+    return SplitWindowNames(value)
+end
+
+function CaptureWindow(pluginId, displayName, win, kind)
+    if not WindowExists(win) then return nil end
+
+    -- Only documented geometry selectors; no owner discovery or global scan.
+    local x = tonumber(WindowInfo(win, 10))
+    local y = tonumber(WindowInfo(win, 11))
+    local w = tonumber(WindowInfo(win, 3))
+    local h = tonumber(WindowInfo(win, 4))
+
+    if x == nil then x = tonumber(WindowInfo(win, 1)) end
+    if y == nil then y = tonumber(WindowInfo(win, 2)) end
+
+    if x == nil or y == nil or w == nil or h == nil then return nil end
+
+    return {
+        kind = kind or "managed",
+        plugin_id = pluginId,
+        plugin_name = displayName,
+        window = win,
+        x = math.floor(x),
+        y = math.floor(y),
+        width = math.floor(w),
+        height = math.floor(h),
+        mode = tonumber(WindowInfo(win, 7)) or 0,
+        flags = tonumber(WindowInfo(win, 8)) or 0,
+        background = tonumber(WindowInfo(win, 9)) or 0
+    }
+end
+
+function CollectLayoutRecords(verbose)
+    local rows = {}
+
+    for _, entry in ipairs(MANAGED_PLUGINS) do
+        if IsPluginInstalled(entry.id) then
+            local names = GetManagedWindows(entry.id)
+            if verbose then
+                ControllerNote("cyan", entry.name .. ": " .. tostring(#names) .. " managed window(s)")
+            end
+
+            for _, win in ipairs(names) do
+                local row = CaptureWindow(entry.id, entry.name, win, "managed")
+                if row then table.insert(rows, row) end
+            end
+        elseif verbose then
+            ControllerNote("yellow", entry.name .. ": not installed")
+        end
+    end
+
+    -- Known adapter for Nick Gammon's Generic_Chat_Miniwindow. Its real miniwindow
+    -- name is its plugin ID. We address that one exact window only.
+    if IsPluginInstalled(CHAT_PLUGIN_ID) and WindowExists(CHAT_PLUGIN_ID) then
+        local row = CaptureWindow(
+            CHAT_PLUGIN_ID,
+            CHAT_PLUGIN_NAME,
+            CHAT_PLUGIN_ID,
+            "generic_chat"
+        )
+        if row then
+            table.insert(rows, row)
+            if verbose then ControllerNote("cyan", CHAT_PLUGIN_NAME .. ": 1 window") end
+        end
+    elseif verbose then
+        ControllerNote("yellow", CHAT_PLUGIN_NAME .. ": not installed/visible")
+    end
+
+    return rows
+end
+
+
+function ClampNumber(value, lo, hi)
+    value = tonumber(value) or lo
+    if value < lo then return lo end
+    if value > hi then return hi end
+    return value
+end
+
+function RoundNumber(value)
+    value = tonumber(value) or 0
+    if value >= 0 then
+        return math.floor(value + 0.5)
+    end
+    return math.ceil(value - 0.5)
+end
+
+function CurrentOutputSize()
+    return tonumber(GetInfo(281)) or 0,
+           tonumber(GetInfo(280)) or 0
+end
+
+-- Monitor resolution is deliberately independent of the current MUSHclient
+-- window size.  This is what makes first-install layout deterministic even if
+-- MUSHclient happens to be restored/windowed while the suite is installed.
+function CurrentMonitorSize()
+    local okW, width = pcall(GetSystemMetrics, 0)
+    local okH, height = pcall(GetSystemMetrics, 1)
+
+    width = okW and tonumber(width) or 0
+    height = okH and tonumber(height) or 0
+
+    if width > 0 and height > 0 then
+        return width, height
+    end
+
+    -- Very old/unusual MUSHclient builds: fall back safely to the current
+    -- output canvas rather than refusing to restore a layout at all.
+    return CurrentOutputSize()
+end
+
+function ReadGutterLayoutState()
+    if not IsPluginInstalled(UI_LAYOUT_CONTROLLER_ID) then
+        return nil, nil
+    end
+
+    if PluginSupports(UI_LAYOUT_CONTROLLER_ID, "GetManagedGutterLayout") ~= error_code.eOK then
+        return nil, nil
+    end
+
+    local rc, value =
+        CallPlugin(
+            UI_LAYOUT_CONTROLLER_ID,
+            "GetManagedGutterLayout"
+        )
+
+    if rc ~= error_code.eOK then
+        return nil, nil
+    end
+
+    local left, right =
+        tostring(value or ""):match("^(-?%d+)%s+(-?%d+)$")
+
+    return tonumber(left), tonumber(right)
+end
+
+function ApplyGutterLayout(meta, geometryScale)
+    if not IsPluginInstalled(UI_LAYOUT_CONTROLLER_ID) then
+        return
+    end
+
+    if PluginSupports(UI_LAYOUT_CONTROLLER_ID, "ApplyManagedGutterLayout") ~= error_code.eOK then
+        return
+    end
+
+    local left = tonumber(meta and meta.gutter_left) or FALLBACK_GUTTER_LEFT
+    local right = tonumber(meta and meta.gutter_right) or FALLBACK_GUTTER_RIGHT
+
+    left = math.max(0, RoundNumber(left * geometryScale))
+    right = math.max(0, RoundNumber(right * geometryScale))
+
+    CallPlugin(
+        UI_LAYOUT_CONTROLLER_ID,
+        "ApplyManagedGutterLayout",
+        tostring(left) .. "\t" .. tostring(right)
+    )
+end
+
+function ComputeScaleInfo(meta)
+    local actualOutputW, actualOutputH = CurrentOutputSize()
+    local currentMonitorW, currentMonitorH = CurrentMonitorSize()
+
+    local sourceOutputW = tonumber(meta and meta.output_width) or actualOutputW
+    local sourceOutputH = tonumber(meta and meta.output_height) or actualOutputH
+    local sourceMonitorW = tonumber(meta and meta.monitor_width) or 0
+    local sourceMonitorH = tonumber(meta and meta.monitor_height) or 0
+
+    local monitorMetadataValid =
+        sourceMonitorW > 0 and sourceMonitorH > 0 and
+        currentMonitorW > 0 and currentMonitorH > 0 and
+        sourceOutputW > 0 and sourceOutputH > 0
+
+    local geometry = 1.0
+    local targetCanvasW = actualOutputW
+    local targetCanvasH = actualOutputH
+    local basis = "output"
+
+    if monitorMetadataValid then
+        -- Uniform geometry scale is based ONLY on physical monitor resolution.
+        -- The target MUSHclient canvas is predicted from the reference canvas /
+        -- monitor proportions so a windowed installer does not distort the
+        -- initial placement.  Width and height are predicted separately, which
+        -- also preserves edge anchoring on ultrawide/16:10 displays.
+        geometry =
+            math.min(
+                currentMonitorW / sourceMonitorW,
+                currentMonitorH / sourceMonitorH
+            )
+
+        targetCanvasW =
+            currentMonitorW * (sourceOutputW / sourceMonitorW)
+        targetCanvasH =
+            currentMonitorH * (sourceOutputH / sourceMonitorH)
+        basis = "monitor"
+
+    elseif actualOutputW > 0 and actualOutputH > 0 and
+           sourceOutputW > 0 and sourceOutputH > 0
+    then
+        -- Backward-compatible fallback for old saved layouts that predate the
+        -- monitor metadata.
+        geometry =
+            math.min(
+                actualOutputW / sourceOutputW,
+                actualOutputH / sourceOutputH
+            )
+        targetCanvasW = actualOutputW
+        targetCanvasH = actualOutputH
+    end
+
+    local typography =
+        ClampNumber(
+            math.sqrt(math.max(0.01, geometry)),
+            MIN_TYPE_SCALE,
+            MAX_TYPE_SCALE
+        )
+
+    return {
+        basis = basis,
+        current_width = targetCanvasW,
+        current_height = targetCanvasH,
+        source_width = sourceOutputW,
+        source_height = sourceOutputH,
+        actual_output_width = actualOutputW,
+        actual_output_height = actualOutputH,
+        source_monitor_width = sourceMonitorW,
+        source_monitor_height = sourceMonitorH,
+        current_monitor_width = currentMonitorW,
+        current_monitor_height = currentMonitorH,
+        geometry = geometry,
+        typography = typography
+    }
+end
+
+function ScaledAxisPosition(startPos, size, sourceExtent, currentExtent, scale)
+    local center = startPos + size / 2
+    local newSize = size * scale
+
+    -- Edge windows stay attached to their edge. Center windows stay around
+    -- the center. This behaves much better than blindly multiplying X/Y on
+    -- ultrawide, 16:10, 16:9, and portrait-ish client areas.
+    if center <= sourceExtent * 0.34 then
+        return startPos * scale, newSize
+    elseif center >= sourceExtent * 0.66 then
+        local farMargin = sourceExtent - (startPos + size)
+        return currentExtent - farMargin * scale - newSize, newSize
+    end
+
+    local centerOffset = center - sourceExtent / 2
+    local newCenter = currentExtent / 2 + centerOffset * scale
+    return newCenter - newSize / 2, newSize
+end
+
+function ScaleLayoutRecord(r, scaleInfo)
+    local x, w =
+        ScaledAxisPosition(
+            r.x,
+            r.width,
+            scaleInfo.source_width,
+            scaleInfo.current_width,
+            scaleInfo.geometry
+        )
+
+    local y, h =
+        ScaledAxisPosition(
+            r.y,
+            r.height,
+            scaleInfo.source_height,
+            scaleInfo.current_height,
+            scaleInfo.geometry
+        )
+
+    local copy = {}
+    for k, v in pairs(r) do copy[k] = v end
+
+    copy.x = RoundNumber(x)
+    copy.y = RoundNumber(y)
+    copy.width = math.max(1, RoundNumber(w))
+    copy.height = math.max(1, RoundNumber(h))
+
+    return copy
+end
+
+function ScaleKnownPluginFonts(typeScale)
+    local s = ClampNumber(typeScale, MIN_TYPE_SCALE, MAX_TYPE_SCALE)
+
+    local function size(base, lo, hi)
+        return math.max(
+            lo or 5,
+            math.min(
+                hi or 32,
+                RoundNumber(base * s)
+            )
+        )
+    end
+
+    -- These are fixed, known windows/font IDs. No global miniwindow scanning.
+    -- Enemy Tracker is intentionally excluded because it already has its own
+    -- responsive font-density system based on card width.
+    -- Automapper is excluded because map-node type is tied to map zoom.
+    -- World Map is excluded because its 9x9 cell metrics are intentionally fixed.
+
+    local id = "91c7e4a23bf84d1aa0e9c562" -- Status
+    if WindowExists(id) then
+        pcall(WindowFont, id, "body"..id, "Lucida Console", size(9, 7, 13))
+        pcall(WindowFont, id, "title"..id, "Lucida Console", size(9, 7, 13), true)
+    end
+
+    id = "a1e4bf29c1a8477fa19b2201" -- XP/AP/Gold
+    if WindowExists(id) then
+        pcall(WindowFont, id, "body"..id, "Lucida Console", size(9, 7, 13))
+        pcall(WindowFont, id, "title"..id, "Lucida Console", size(9, 7, 13), true)
+    end
+
+    if WindowExists("ExitWindow") then
+        pcall(WindowFont, "ExitWindow", "ExitWindowFont", "Arial", size(11, 9, 15), true)
+        pcall(WindowFont, "ExitWindow", "ExitWindowSmallFont", "Arial", size(9, 7, 13))
+    end
+
+    id = "6a941f23b8ce4a2d9e7051bc" -- Travel
+    if WindowExists(id) then
+        pcall(WindowFont, id, "body"..id, "Lucida Console", size(10, 8, 14))
+        pcall(WindowFont, id, "title"..id, "Lucida Console", size(9, 7, 13), true)
+    end
+
+    local gauges = "d47f6a92e1b83c5f0a9e2716"
+    local hp = gauges .. "_hp"
+    local mp = gauges .. "_mp"
+    if WindowExists(hp) then
+        pcall(WindowFont, hp, "title"..hp, "Lucida Console", size(9, 7, 13), true)
+        pcall(WindowFont, hp, "body"..hp, "Lucida Console", size(12, 9, 16), true)
+    end
+    if WindowExists(mp) then
+        pcall(WindowFont, mp, "title"..mp, "Lucida Console", size(9, 7, 13), true)
+        pcall(WindowFont, mp, "body"..mp, "Lucida Console", size(12, 9, 16), true)
+    end
+    if IsPluginInstalled(CHAT_PLUGIN_ID) and
+       PluginSupports(CHAT_PLUGIN_ID, "ApplyManagedTypography") == error_code.eOK
+    then
+        CallPlugin(
+            CHAT_PLUGIN_ID,
+            "ApplyManagedTypography",
+            tostring(s)
+        )
+    end
+
+end
+
+function SaveLayout(profile)
+    local path = LayoutPath(profile)
+    if not path then
+        ControllerNote("red", "Could not determine the controller plugin directory.")
+        return false
+    end
+
+    ControllerNote("cyan", "Capturing managed UI layout...")
+    local rows = CollectLayoutRecords(false)
+
+    local f, err = io.open(path, "w")
+    if not f then
+        ControllerNote("red", "Could not write layout file: " .. tostring(err))
+        return false
+    end
+
+    f:write("# SquareSoft UI Layout\n")
+    f:write("# format=" .. tostring(LAYOUT_FORMAT_VERSION) .. "\n")
+    f:write("# generated=" .. os.date("%Y-%m-%d %H:%M:%S") .. "\n")
+    f:write("# output_width=" .. tostring(GetInfo(281) or "") .. "\n")
+    f:write("# output_height=" .. tostring(GetInfo(280) or "") .. "\n")
+
+    local monitorWidth, monitorHeight = CurrentMonitorSize()
+    f:write("# monitor_width=" .. tostring(monitorWidth or "") .. "\n")
+    f:write("# monitor_height=" .. tostring(monitorHeight or "") .. "\n")
+
+    local gutterLeft, gutterRight = ReadGutterLayoutState()
+    if gutterLeft ~= nil then
+        f:write("# gutter_left=" .. tostring(gutterLeft) .. "\n")
+    end
+    if gutterRight ~= nil then
+        f:write("# gutter_right=" .. tostring(gutterRight) .. "\n")
+    end
+
+    f:write("# Fields: WINDOW|kind|plugin_id|plugin_name|window_name|x|y|width|height|mode|flags|background\n")
+
+    for _, r in ipairs(rows) do
+        f:write(
+            "WINDOW|" ..
+            EscapeField(r.kind) .. "|" ..
+            EscapeField(r.plugin_id) .. "|" ..
+            EscapeField(r.plugin_name) .. "|" ..
+            EscapeField(r.window) .. "|" ..
+            tostring(r.x) .. "|" ..
+            tostring(r.y) .. "|" ..
+            tostring(r.width) .. "|" ..
+            tostring(r.height) .. "|" ..
+            tostring(r.mode) .. "|" ..
+            tostring(r.flags) .. "|" ..
+            tostring(r.background) .. "\n"
+        )
+    end
+
+    f:close()
+
+    ControllerNote("lime", "Saved " .. tostring(#rows) .. " windows.")
+    Note(path)
+    return true
+end
+
+function ParseLayoutFile(path)
+    local f, err = io.open(path, "r")
+    if not f then return nil, nil, err end
+
+    local rows = {}
+    local meta = {}
+
+    for line in f:lines() do
+        local key, value = line:match("^#%s*([%w_]+)%s*=%s*(.-)%s*$")
+        if key and value then
+            meta[key] = value
+        elseif line:sub(1, 7) == "WINDOW|" then
+            local p = SplitPipe(line)
+
+            if #p >= 12 then
+                local row = {
+                    kind = UnescapeField(p[2]),
+                    plugin_id = UnescapeField(p[3]),
+                    plugin_name = UnescapeField(p[4]),
+                    window = UnescapeField(p[5]),
+                    x = tonumber(p[6]),
+                    y = tonumber(p[7]),
+                    width = tonumber(p[8]),
+                    height = tonumber(p[9]),
+                    mode = tonumber(p[10]),
+                    flags = tonumber(p[11]),
+                    background = tonumber(p[12])
+                }
+
+                if row.plugin_id ~= "" and row.window ~= "" and
+                   row.x and row.y and row.width and row.height then
+                    table.insert(rows, row)
+                end
+            end
+        end
+    end
+
+    f:close()
+    return rows, meta
+end
+
+function ApplyManagedLayout(r)
+    if not IsPluginInstalled(r.plugin_id) then
+        return false, "plugin not installed"
+    end
+
+    if PluginSupports(r.plugin_id, "ApplyManagedLayout") ~= error_code.eOK then
+        return false, "layout API missing"
+    end
+
+    local payload =
+        r.window .. "\t" ..
+        tostring(math.floor(r.x)) .. "\t" ..
+        tostring(math.floor(r.y)) .. "\t" ..
+        tostring(math.floor(r.width)) .. "\t" ..
+        tostring(math.floor(r.height))
+
+    local rc, result = CallPlugin(r.plugin_id, "ApplyManagedLayout", payload)
+    if rc ~= error_code.eOK then
+        return false, "plugin returned " .. tostring(rc)
+    end
+
+    if tostring(result or "") ~= "ok" then
+        return false, tostring(result or "layout rejected")
+    end
+
+    return true
+end
+
+function SetOtherPluginVariable(pluginId, key, value)
+    local rc = CallPlugin(pluginId, "SetVariable", tostring(key), tostring(value))
+    return rc == error_code.eOK
+end
+
+function SaveOtherPluginState(pluginId)
+    pcall(function()
+        CallPlugin(pluginId, "SaveState")
+    end)
+end
+
+function ApplyGenericChatLayout(r)
+    if IsPluginInstalled(CHAT_PLUGIN_ID) and
+       PluginSupports(CHAT_PLUGIN_ID, "ApplyManagedLayout") == error_code.eOK
+    then
+        local payload =
+            r.window .. "\t" ..
+            tostring(math.floor(r.x)) .. "\t" ..
+            tostring(math.floor(r.y)) .. "\t" ..
+            tostring(math.floor(r.width)) .. "\t" ..
+            tostring(math.floor(r.height))
+
+        local rc, result =
+            CallPlugin(
+                CHAT_PLUGIN_ID,
+                "ApplyManagedLayout",
+                payload
+            )
+
+        if rc == error_code.eOK and tostring(result or "") == "ok" then
+            return true
+        end
+    end
+
+    if not IsPluginInstalled(CHAT_PLUGIN_ID) then
+        return false, "chat plugin not installed"
+    end
+    if not WindowExists(CHAT_PLUGIN_ID) then
+        return false, "chat window not created"
+    end
+
+    local background =
+        tonumber(WindowInfo(CHAT_PLUGIN_ID, 9)) or
+        tonumber(r.background) or
+        ColourNameToRGB("black")
+
+    local mode =
+        tonumber(r.mode) or
+        tonumber(WindowInfo(CHAT_PLUGIN_ID, 7)) or
+        miniwin.pos_top_left
+
+    local flags =
+        tonumber(r.flags) or
+        tonumber(WindowInfo(CHAT_PLUGIN_ID, 8)) or
+        miniwin.create_absolute_location
+
+    WindowResize(
+        CHAT_PLUGIN_ID,
+        math.max(1, math.floor(r.width)),
+        math.max(1, math.floor(r.height)),
+        background
+    )
+
+    WindowPosition(
+        CHAT_PLUGIN_ID,
+        math.floor(r.x),
+        math.floor(r.y),
+        mode,
+        flags
+    )
+
+    -- Persist the size and movewindow state in the chat plugin's own state file.
+    -- This avoids replacing/modifying the user's customized chat plugin.
+    SetOtherPluginVariable(CHAT_PLUGIN_ID, "WINDOW_WIDTH", math.floor(r.width))
+    SetOtherPluginVariable(CHAT_PLUGIN_ID, "WINDOW_HEIGHT", math.floor(r.height))
+    SetOtherPluginVariable(CHAT_PLUGIN_ID, "mw_" .. CHAT_PLUGIN_ID .. "_windowx", math.floor(r.x))
+    SetOtherPluginVariable(CHAT_PLUGIN_ID, "mw_" .. CHAT_PLUGIN_ID .. "_windowy", math.floor(r.y))
+    SetOtherPluginVariable(CHAT_PLUGIN_ID, "mw_" .. CHAT_PLUGIN_ID .. "_windowmode", mode)
+    SetOtherPluginVariable(CHAT_PLUGIN_ID, "mw_" .. CHAT_PLUGIN_ID .. "_windowflags", flags)
+    SaveOtherPluginState(CHAT_PLUGIN_ID)
+
+    return true
+end
+
+function LoadLayoutInternal(profile, exactPixels)
+    local path = LayoutPath(profile)
+    if not path then
+        ControllerNote("red", "Could not determine the controller plugin directory.")
+        return false
+    end
+
+    local rows, meta, err = ParseLayoutFile(path)
+    if not rows then
+        ControllerNote("red", "Could not read layout file: " .. tostring(err))
+        Note(path)
+        return false
+    end
+
+    local scaleInfo = ComputeScaleInfo(meta)
+
+    if exactPixels then
+        scaleInfo.geometry = 1.0
+        scaleInfo.typography = 1.0
+        -- Exact mode deliberately uses the source canvas for positions.
+        scaleInfo.current_width = scaleInfo.source_width
+        scaleInfo.current_height = scaleInfo.source_height
+    end
+
+    local applied = 0
+    local failed = 0
+
+    -- Restore the gutter reservation before placing windows on top of it.
+    ApplyGutterLayout(meta, scaleInfo.geometry)
+
+    for _, original in ipairs(rows) do
+        local r =
+            exactPixels
+            and original
+            or ScaleLayoutRecord(original, scaleInfo)
+
+        local ok, why
+
+        if r.kind == "generic_chat" and r.plugin_id == CHAT_PLUGIN_ID then
+            ok, why = ApplyGenericChatLayout(r)
+        else
+            ok, why = ApplyManagedLayout(r)
+        end
+
+        if ok then
+            applied = applied + 1
+        else
+            failed = failed + 1
+            ControllerNote(
+                "yellow",
+                "Skipped " .. tostring(r.plugin_name) ..
+                " / " .. tostring(r.window) ..
+                " (" .. tostring(why or "unknown error") .. ")"
+            )
+        end
+    end
+
+    if not exactPixels then
+        ScaleKnownPluginFonts(scaleInfo.typography)
+    end
+
+    Redraw()
+
+    local modeText = exactPixels and "EXACT" or "ADAPTIVE"
+    ControllerNote(
+        "lime",
+        modeText .. " layout: loaded " .. tostring(applied) .. " windows" ..
+        (failed > 0 and ("; " .. tostring(failed) .. " skipped.") or ".")
+    )
+
+    if not exactPixels then
+        if scaleInfo.basis == "monitor" then
+            ControllerNote(
+                "gray",
+                string.format(
+                    "Monitor %dx%d -> %dx%d; reference canvas %dx%d -> target %.0fx%.0f; current output %dx%d; geometry %.3fx, type %.3fx",
+                    scaleInfo.source_monitor_width,
+                    scaleInfo.source_monitor_height,
+                    scaleInfo.current_monitor_width,
+                    scaleInfo.current_monitor_height,
+                    scaleInfo.source_width,
+                    scaleInfo.source_height,
+                    scaleInfo.current_width,
+                    scaleInfo.current_height,
+                    scaleInfo.actual_output_width,
+                    scaleInfo.actual_output_height,
+                    scaleInfo.geometry,
+                    scaleInfo.typography
+                )
+            )
+        else
+            ControllerNote(
+                "gray",
+                string.format(
+                    "No monitor metadata; output fallback %dx%d -> %dx%d; geometry %.3fx, type %.3fx",
+                    scaleInfo.source_width,
+                    scaleInfo.source_height,
+                    scaleInfo.current_width,
+                    scaleInfo.current_height,
+                    scaleInfo.geometry,
+                    scaleInfo.typography
+                )
+            )
+        end
+    end
+
+    Note(path)
+    return true
+end
+
+function LoadLayout(profile)
+    return LoadLayoutInternal(profile or "", false)
+end
+
+function LoadLayoutExact(profile)
+    return LoadLayoutInternal(profile or "", true)
+end
+
+function LayoutInspectAlias()
+    ControllerNote("cyan", "Safe layout inspection:")
+    local rows = CollectLayoutRecords(true)
+
+    for _, r in ipairs(rows) do
+        Note(
+            string.format(
+                "  %-24s  x=%d y=%d  %dx%d  [%s]",
+                tostring(r.plugin_name):sub(1,24),
+                r.x, r.y, r.width, r.height, r.kind
+            )
+        )
+    end
+
+    ControllerNote("cyan", tostring(#rows) .. " window(s) would be saved.")
+end
+
+function LayoutSaveAlias(name, line, wildcards)
+    SaveLayout((wildcards and wildcards[1]) or "")
+end
+
+function LayoutLoadAlias(name, line, wildcards)
+    local arg = tostring((wildcards and wildcards[1]) or "")
+    local lowered = arg:lower()
+
+    if lowered == "exact" then
+        LoadLayoutExact("")
+    elseif lowered == "scaled" or lowered == "auto" or lowered == "adaptive" then
+        LoadLayout("")
+    else
+        LoadLayout(arg)
+    end
+end
+
+function LayoutScaleAlias()
+    local path = LayoutPath("")
+    local rows, meta, err = ParseLayoutFile(path)
+    if not rows then
+        ControllerNote("red", "Could not read layout file: " .. tostring(err))
+        return
+    end
+
+    local s = ComputeScaleInfo(meta)
+    if s.basis == "monitor" then
+        ControllerNote(
+            "cyan",
+            string.format(
+                "Monitor %dx%d -> %dx%d; reference canvas %dx%d -> target %.0fx%.0f; current output %dx%d; geometry %.3fx, type %.3fx",
+                s.source_monitor_width,
+                s.source_monitor_height,
+                s.current_monitor_width,
+                s.current_monitor_height,
+                s.source_width,
+                s.source_height,
+                s.current_width,
+                s.current_height,
+                s.actual_output_width,
+                s.actual_output_height,
+                s.geometry,
+                s.typography
+            )
+        )
+    else
+        ControllerNote(
+            "yellow",
+            string.format(
+                "No monitor metadata; output fallback %dx%d -> %dx%d; geometry %.3fx, type %.3fx",
+                s.source_width,
+                s.source_height,
+                s.current_width,
+                s.current_height,
+                s.geometry,
+                s.typography
+            )
+        )
+    end
+end
+
+function LayoutPathAlias()
+    ControllerNote("cyan", "Default layout file:")
+    Note(LayoutPath("") or "(unknown)")
+end
+
+function PluginStatusAlias()
+    ControllerNote("cyan", "Managed plugin status:")
+
+    for _, entry in ipairs(MANAGED_PLUGINS) do
+        local installed = IsPluginInstalled(entry.id)
+        local api = installed and
+            PluginSupports(entry.id, "ApplyManagedLayout") == error_code.eOK
+
+        Note(
+            "  " .. entry.name .. " : " ..
+            (not installed and "not installed" or
+             (api and "installed / layout-aware" or "installed / needs layout-api copy"))
+        )
+    end
+
+    Note(
+        "  " .. CHAT_PLUGIN_NAME .. " : " ..
+        (IsPluginInstalled(CHAT_PLUGIN_ID) and "installed / adapter" or "not installed")
+    )
+end
+
+function OnPluginInstall()
+    ControllerNote("lime", "v1.5 ready. Monitor-based layout scaling is enabled by default.")
+end
+
+]]>
+</script>
+</muclient>

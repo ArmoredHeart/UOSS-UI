@@ -1,0 +1,1453 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+
+<muclient>
+    <plugin
+    name="HP_MP_Gauges"
+    author="Claude / modified by ChatGPT"
+    id="d47f6a92e1b83c5f0a9e2716"
+    language="Lua"
+    purpose="Resizable themed cockpit HP and MP gauges"
+    date_written="2026-09-06"
+    version="2.0"
+    save_state="y"
+    >
+
+<description trim="y">
+<![CDATA[
+USAGE:
+
+  gauges show   : show both gauge windows
+  gauges hide   : hide both gauge windows
+
+Automatically updates from lines like:
+  <<OVERALL CONDITION:<HP:100%> <SP:31%><Mob: None> Exp:23.352160%>>
+
+(SP in that line is actually MP, per game's own mislabeling - both
+gauges are driven straight off the displayed percentages, no separate
+tracking of exact HP/MP numbers.)
+]]>
+
+Modular theme client: colours are supplied by UI_Theme_Controller v2.0 when available.
+</description>
+
+</plugin>
+
+<triggers>
+    <trigger
+    script="OnConditionLine"
+    match="^\s*&lt;&lt;OVERALL CONDITION:&lt;HP:\s*(\d+)%&gt;\s*&lt;SP:\s*(\d+)%&gt;&lt;Mob:\s*([^&gt;]*)&gt;\s*Exp:\s*([\d.]+)%&gt;&gt;$"
+    regexp="y"
+    ignore_case="y"
+    enabled="y"
+    omit_from_output="n"
+    keep_evaluating="y"
+    sequence="70"
+    ></trigger>
+</triggers>
+
+<aliases>
+    <alias
+    script="gauges_show"
+    match="^gauges show$"
+    regexp="y"
+    ignore_case="y"
+    enabled="y"
+    sequence="100"
+    ></alias>
+
+    <alias
+    script="gauges_hide"
+    match="^gauges hide$"
+    regexp="y"
+    ignore_case="y"
+    enabled="y"
+    sequence="100"
+    ></alias>
+
+    <alias
+    script="alert_hp"
+    match="^alert hp\s+(\d+)$"
+    regexp="y"
+    ignore_case="y"
+    enabled="y"
+    sequence="100"
+    ></alias>
+
+    <alias
+    script="alert_mp"
+    match="^alert mp\s+(\d+)$"
+    regexp="y"
+    ignore_case="y"
+    enabled="y"
+    sequence="100"
+    ></alias>
+
+    <alias
+    script="alert_status"
+    match="^alert$"
+    regexp="y"
+    ignore_case="y"
+    enabled="y"
+    sequence="100"
+    ></alias>
+
+</aliases>
+
+
+<timers>
+    <timer
+    name="gauge_alert_flash"
+    second="0.5"
+    enabled="y"
+    script="GaugeAlertTick"
+    ></timer>
+</timers>
+
+<script>
+<![CDATA[
+
+require "movewindow"
+
+local gaugesVisible = true
+local hasHPReading = false
+
+PluginID = GetPluginID()
+HPWin = PluginID .. "_hp"
+MPWin = PluginID .. "_mp"
+
+-- Same footprint as the chakra indicator light
+WINDOW_WIDTH = 140
+WINDOW_HEIGHT = 155
+MIN_GAUGE_WIDTH = 95
+MIN_GAUGE_HEIGHT = 105
+RESIZE_GRIP_SIZE = 14
+
+HP_WINDOW_WIDTH = math.max(MIN_GAUGE_WIDTH, tonumber(GetVariable("hp_window_width")) or WINDOW_WIDTH)
+HP_WINDOW_HEIGHT = math.max(MIN_GAUGE_HEIGHT, tonumber(GetVariable("hp_window_height")) or WINDOW_HEIGHT)
+MP_WINDOW_WIDTH = math.max(MIN_GAUGE_WIDTH, tonumber(GetVariable("mp_window_width")) or WINDOW_WIDTH)
+MP_WINDOW_HEIGHT = math.max(MIN_GAUGE_HEIGHT, tonumber(GetVariable("mp_window_height")) or WINDOW_HEIGHT)
+resizeGaugeTarget = nil
+TITLE_HEIGHT = 18
+TITLE_FONT_NAME = "Lucida Console"
+TITLE_FONT_SIZE = 9
+BODY_FONT_NAME = "Lucida Console"
+BODY_FONT_SIZE = 12
+
+--------------------------------------------------
+-- SHARED UI THEMES
+--------------------------------------------------
+
+THEME_CONTROLLER_ID =
+    "43c8d047be7a418ba5e86916"
+
+THEME_BROADCAST_MESSAGE = 9042
+
+--------------------------------------------------
+-- AUTHORITATIVE HP PERCENT BROADCAST
+--
+-- The Theme Controller listens to this instead of parsing the
+-- condition line a second time.
+--------------------------------------------------
+
+HP_PERCENT_BROADCAST_MESSAGE =
+    9043
+
+
+--------------------------------------------------
+-- MODULAR THEME CLIENT
+--
+-- The controller owns the real palette. The local THEMES table
+-- below is retained only as a safe fallback if the controller
+-- is unavailable.
+--------------------------------------------------
+
+local THEME_PROFILE =
+    "gauges"
+
+
+function ThemeColour(
+    role,
+    fallback
+)
+
+    local rc,
+          value =
+        CallPlugin(
+            THEME_CONTROLLER_ID,
+            "GetThemeColour",
+            THEME_PROFILE,
+            role
+        )
+
+
+    if rc ==
+       error_code.eOK and
+       type(
+           value
+       ) ==
+       "string" and
+       value ~=
+       ""
+    then
+
+        return
+            ColourNameToRGB(
+                value
+            )
+
+    end
+
+
+    return
+        ColourNameToRGB(
+            fallback
+        )
+end
+
+
+THEMES = {
+
+    classic = {
+        background = "#000000",
+        border = "#E8E8E8",
+        title_bar = "#202020",
+        title_text = "#D4D0C8",
+
+        dial_face = "#101010",
+        dial_outer = "#D0D0D0",
+        dial_inner = "#505050",
+
+        track = "#333333",
+        tick = "#777777",
+        hub = "#CCCCCC",
+        readout = "#D4D0C8",
+
+        mp_active = "#64C8FF",
+        mp_active_dark = "#245C78"
+    },
+
+    amber = {
+        background = "#050301",
+        border = "#6B3D18",
+        title_bar = "#160B03",
+        title_text = "#FFB347",
+
+        dial_face = "#090501",
+        dial_outer = "#9A571D",
+        dial_inner = "#4A2910",
+
+        track = "#2B1708",
+        tick = "#A65F20",
+        hub = "#E38B30",
+        readout = "#FFB347",
+
+        mp_active = "#FF9D26",
+        mp_active_dark = "#6B3308"
+    },
+
+    default = {
+        background = "#000500",
+        border = "#285B28",
+        title_bar = "#061306",
+        title_text = "#9AFF82",
+
+        dial_face = "#000900",
+        dial_outer = "#397A39",
+        dial_inner = "#1C451C",
+
+        track = "#0D240D",
+        tick = "#4EA34E",
+        hub = "#72DD72",
+        readout = "#9AFF82",
+
+        mp_active = "#67FF67",
+        mp_active_dark = "#176B24"
+    }
+}
+
+currentTheme = "default"
+
+function LoadTheme()
+
+    local theme =
+        GetPluginVariable(
+            THEME_CONTROLLER_ID,
+            "theme"
+        )
+
+    if not THEMES[theme] then
+        theme = "default"
+    end
+
+    currentTheme =
+        GetPluginVariable(
+            THEME_CONTROLLER_ID,
+            "effective_theme"
+        ) or
+        theme
+
+    local T = THEMES[theme]
+
+    BACKGROUND_COLOUR = ThemeColour("background", T.background)
+    BORDER_COLOUR = ThemeColour("border", T.border)
+    TITLE_BAR_COLOUR = ThemeColour("title_bar", T.title_bar)
+    TITLE_TEXT_COLOUR = ThemeColour("title_text", T.title_text)
+
+    DIAL_FACE_COLOUR = ThemeColour("dial_face", T.dial_face)
+    DIAL_OUTER_COLOUR = ThemeColour("dial_outer", T.dial_outer)
+    DIAL_INNER_COLOUR = ThemeColour("dial_inner", T.dial_inner)
+
+    TRACK_COLOUR = ThemeColour("track", T.track)
+    TICK_COLOUR = ThemeColour("tick", T.tick)
+    HUB_COLOUR = ThemeColour("hub", T.hub)
+    READOUT_COLOUR = ThemeColour("readout", T.readout)
+
+    MP_ACTIVE_COLOUR = ThemeColour("mp_active", T.mp_active)
+    MP_ACTIVE_DARK = ThemeColour("mp_active_dark", T.mp_active_dark)
+end
+
+LoadTheme()
+
+-- Gauge geometry
+RADIUS = 48
+DIAL_RADIUS = 54
+
+
+--------------------------------------------------
+-- ALERT SETTINGS
+--------------------------------------------------
+
+ALERT_RED = ColourNameToRGB("#FF3038")
+ALERT_DARK_RED = ColourNameToRGB("#4A080B")
+ALERT_BRIGHT = ColourNameToRGB("#FFD9D9")
+
+hpAlertThreshold =
+    tonumber(
+        GetVariable("hpAlertThreshold")
+    ) or 25
+
+mpAlertThreshold =
+    tonumber(
+        GetVariable("mpAlertThreshold")
+    ) or 20
+
+hpAlertThreshold =
+    math.max(
+        0,
+        math.min(
+            100,
+            hpAlertThreshold
+        )
+    )
+
+mpAlertThreshold =
+    math.max(
+        0,
+        math.min(
+            100,
+            mpAlertThreshold
+        )
+    )
+
+alertFlashOn = false
+
+--------------------------------------------------
+-- Gradient helpers (same scheme as the status-line colouring)
+--------------------------------------------------
+
+local function lerp(c1, c2, t)
+    return
+        math.floor(c1[1] + (c2[1] - c1[1]) * t + 0.5),
+        math.floor(c1[2] + (c2[2] - c1[2]) * t + 0.5),
+        math.floor(c1[3] + (c2[3] - c1[3]) * t + 0.5)
+end
+
+local function gradient(percent, stops)
+    percent = math.max(0, math.min(100, percent))
+    for i = 1, #stops - 1 do
+        local p1, c1 = stops[i][1], stops[i][2]
+        local p2, c2 = stops[i + 1][1], stops[i + 1][2]
+        if percent >= p2 and percent <= p1 then
+            local t = (percent - p2) / (p1 - p2)
+            return lerp(c2, c1, t)
+        end
+    end
+    return stops[#stops][2][1], stops[#stops][2][2], stops[#stops][2][3]
+end
+
+HP_STOPS = {
+    {100, {65, 255, 95}},
+    {80,  {120, 255, 70}},
+    {60,  {225, 245, 55}},
+    {40,  {255, 180, 45}},
+    {20,  {255, 95, 45}},
+    {0,   {255, 45, 55}}
+}
+
+MP_STOPS = {
+    {100, {60, 235, 255}},
+    {50,  {180, 70, 255}},
+    {0,   {255, 65, 75}}
+}
+
+
+AMBER_MP_STOPS = {
+    {100, {255, 210, 120}},
+    {75,  {255, 170, 65}},
+    {50,  {235, 120, 35}},
+    {25,  {180, 72, 18}},
+    {0,   {95, 35, 8}}
+}
+
+GREEN_MP_STOPS = {
+    {100, {190, 255, 165}},
+    {75,  {105, 235, 105}},
+    {50,  {55, 185, 70}},
+    {25,  {25, 120, 42}},
+    {0,   {10, 65, 22}}
+}
+
+function ColourForPercent(percent, stops)
+    local r, g, b = gradient(percent, stops)
+    return ColourNameToRGB(string.format("#%02X%02X%02X", r, g, b))
+end
+
+
+--------------------------------------------------
+-- NEEDLE / ACTIVE COLOURS
+--------------------------------------------------
+
+function HPNeedleColour(percent)
+
+    if percent < 15 then
+        return ColourNameToRGB("#FF3038")
+    elseif percent < 30 then
+        return ColourNameToRGB("#FF4D4D")
+    elseif percent < 60 then
+        return ColourNameToRGB("#FFB347")
+    else
+        return ColourNameToRGB("#55FF70")
+    end
+end
+
+function MPGaugeColour(percent)
+
+    if currentTheme == "amber" then
+        return ColourForPercent(percent, AMBER_MP_STOPS)
+    elseif currentTheme == "default" then
+        return ColourForPercent(percent, GREEN_MP_STOPS)
+    end
+
+    return ColourForPercent(percent, MP_STOPS)
+end
+
+--------------------------------------------------
+-- Drawing helpers - built from WindowLine, since that's proven
+-- reliable (used since the original chat plugin's borders/arrows),
+-- rather than relying on untested arc/pie circle modes.
+--------------------------------------------------
+
+-- percent 0-100 -> angle in degrees, standard math convention
+-- (0=right, 90=up, 180=left). 0% -> 180 (left), 100% -> 0 (right).
+function AngleForPercent(percent)
+    percent = math.max(0, math.min(100, percent))
+    return 180 - (percent / 100) * 180
+end
+
+function DrawDialFace(win, centerX, centerY)
+
+    --------------------------------------------------
+    -- Outer instrument bezel
+    --------------------------------------------------
+
+    WindowCircleOp(
+        win,
+        miniwin.circle_ellipse,
+        centerX - DIAL_RADIUS - 2,
+        centerY - DIAL_RADIUS - 2,
+        centerX + DIAL_RADIUS + 2,
+        centerY + DIAL_RADIUS + 2,
+        DIAL_OUTER_COLOUR,
+        miniwin.pen_solid,
+        2,
+        DIAL_OUTER_COLOUR,
+        miniwin.brush_solid
+    )
+
+    --------------------------------------------------
+    -- Inner ring
+    --------------------------------------------------
+
+    WindowCircleOp(
+        win,
+        miniwin.circle_ellipse,
+        centerX - DIAL_RADIUS,
+        centerY - DIAL_RADIUS,
+        centerX + DIAL_RADIUS,
+        centerY + DIAL_RADIUS,
+        DIAL_INNER_COLOUR,
+        miniwin.pen_solid,
+        1,
+        DIAL_FACE_COLOUR,
+        miniwin.brush_solid
+    )
+
+end
+
+
+function DrawArc(win, centerX, centerY, radius, startAngleDeg, endAngleDeg, colour, penWidth)
+    local steps = 24
+    local prevX, prevY = nil, nil
+    for i = 0, steps do
+        local t = i / steps
+        local angleDeg = startAngleDeg + (endAngleDeg - startAngleDeg) * t
+        local angleRad = math.rad(angleDeg)
+        local x = centerX + radius * math.cos(angleRad)
+        local y = centerY - radius * math.sin(angleRad)
+        if prevX then
+            WindowLine(win, prevX, prevY, x, y, colour, miniwin.pen_solid, penWidth)
+        end
+        prevX, prevY = x, y
+    end
+end
+
+function DrawTick(win, centerX, centerY, angleDeg, innerR, outerR, colour)
+    local angleRad = math.rad(angleDeg)
+    local x1 = centerX + innerR * math.cos(angleRad)
+    local y1 = centerY - innerR * math.sin(angleRad)
+    local x2 = centerX + outerR * math.cos(angleRad)
+    local y2 = centerY - outerR * math.sin(angleRad)
+    WindowLine(win, x1, y1, x2, y2, colour, miniwin.pen_solid, 1)
+end
+
+function DrawNeedle(win, centerX, centerY, angleDeg, length, colour)
+    local angleRad = math.rad(angleDeg)
+    local x = centerX + length * math.cos(angleRad)
+    local y = centerY - length * math.sin(angleRad)
+    WindowLine(win, centerX, centerY, x, y, colour, miniwin.pen_solid, 3)
+end
+
+
+
+--------------------------------------------------
+-- RESIZABLE GAUGES
+--------------------------------------------------
+
+function GaugeDimensions(win)
+    if win == HPWin then return HP_WINDOW_WIDTH, HP_WINDOW_HEIGHT end
+    return MP_WINDOW_WIDTH, MP_WINDOW_HEIGHT
+end
+
+function SetGaugeDimensions(win, w, h)
+    w = math.max(MIN_GAUGE_WIDTH, math.floor(tonumber(w) or MIN_GAUGE_WIDTH))
+    h = math.max(MIN_GAUGE_HEIGHT, math.floor(tonumber(h) or MIN_GAUGE_HEIGHT))
+    if win == HPWin then
+        HP_WINDOW_WIDTH, HP_WINDOW_HEIGHT = w, h
+    else
+        MP_WINDOW_WIDTH, MP_WINDOW_HEIGHT = w, h
+    end
+end
+
+function SaveGaugeDimensions()
+    SetVariable("hp_window_width", tostring(HP_WINDOW_WIDTH))
+    SetVariable("hp_window_height", tostring(HP_WINDOW_HEIGHT))
+    SetVariable("mp_window_width", tostring(MP_WINDOW_WIDTH))
+    SetVariable("mp_window_height", tostring(MP_WINDOW_HEIGHT))
+end
+
+function GaugeResizeMouseDown(flags, hotspot_id)
+    resizeGaugeTarget = hotspot_id == "00_resize_hp" and HPWin or MPWin
+    return 0
+end
+
+function UpdateGaugeResize(win)
+    local mouseX = tonumber(WindowInfo(win,17))
+    local mouseY = tonumber(WindowInfo(win,18))
+    local left = tonumber(WindowInfo(win,10)) or tonumber(WindowInfo(win,1)) or 0
+    local top = tonumber(WindowInfo(win,11)) or tonumber(WindowInfo(win,2)) or 0
+    if not mouseX or not mouseY then return false end
+    local w = math.max(MIN_GAUGE_WIDTH, math.floor(mouseX-left+1))
+    local h = math.max(MIN_GAUGE_HEIGHT, math.floor(mouseY-top+1))
+    local ow, oh = GaugeDimensions(win)
+    if w == ow and h == oh then return false end
+    SetGaugeDimensions(win,w,h)
+    WindowResize(win,w,h,BACKGROUND_COLOUR)
+    Redraw()
+    return true
+end
+
+function GaugeResizeMouseMove(flags, hotspot_id)
+    if resizeGaugeTarget then UpdateGaugeResize(resizeGaugeTarget) end
+    SetCursor(miniwin.cursor_nw_se_arrow)
+    return 0
+end
+
+function GaugeResizeMouseUp(flags, hotspot_id)
+    local win = resizeGaugeTarget
+    if win then UpdateGaugeResize(win) end
+    resizeGaugeTarget = nil
+    SaveGaugeDimensions()
+    if win == HPWin then DrawGauge(HPWin,"HP",lastHP,HP_STOPS) else DrawGauge(MPWin,"MP",lastMP,MP_STOPS) end
+    return 0
+end
+
+function InstallGaugeResizeHandle(win)
+    local w,h = GaugeDimensions(win)
+    local id = win == HPWin and "00_resize_hp" or "00_resize_mp"
+    WindowDeleteHotspot(win,id)
+    WindowAddHotspot(win,id,w-RESIZE_GRIP_SIZE,h-RESIZE_GRIP_SIZE,w,h,
+        "","","GaugeResizeMouseDown","","","Drag to resize",miniwin.cursor_nw_se_arrow,0)
+    WindowDragHandler(win,id,"GaugeResizeMouseMove","GaugeResizeMouseUp",0)
+    WindowLine(win,w-11,h-3,w-3,h-11,BORDER_COLOUR,miniwin.pen_solid,1)
+    WindowLine(win,w-7,h-3,w-3,h-7,BORDER_COLOUR,miniwin.pen_solid,1)
+end
+
+--------------------------------------------------
+-- CLICK ACTIONS
+--------------------------------------------------
+
+function UseHighPotion(
+    flags,
+    hotspot_id
+)
+
+    Send("use item hipotion")
+end
+
+
+function UseHighEther(
+    flags,
+    hotspot_id
+)
+
+    Send("use item hiether")
+end
+
+
+function InstallGaugeHotspot(
+    win,
+    hotspot_id,
+    callback,
+    tooltip
+)
+
+    local gaugeWidth, gaugeHeight = GaugeDimensions(win)
+
+    --------------------------------------------------
+    -- Leave the title bar free for dragging.
+    -- The entire gauge body is clickable.
+    --------------------------------------------------
+
+    WindowDeleteHotspot(win, hotspot_id)
+
+    WindowAddHotspot(
+        win,
+        hotspot_id,
+
+        0,
+        TITLE_HEIGHT,
+
+        gaugeWidth,
+        gaugeHeight,
+
+        "",
+        "",
+        "",
+        "",
+        callback,
+
+        tooltip,
+
+        miniwin.cursor_hand,
+        0
+    )
+end
+
+
+--------------------------------------------------
+-- Window setup
+--------------------------------------------------
+
+hpWindowInfo = ""
+mpWindowInfo = ""
+
+function CreateGaugeWindow(win, defaultPos)
+    local gaugeWidth, gaugeHeight = GaugeDimensions(win)
+    check(WindowCreate(win, 0, 0, gaugeWidth, gaugeHeight, 0, 0, BACKGROUND_COLOUR))
+    check(WindowFont(win, "title"..win, TITLE_FONT_NAME, TITLE_FONT_SIZE, true))
+    check(WindowFont(win, "body"..win, BODY_FONT_NAME, BODY_FONT_SIZE, true))
+
+    local info = movewindow.install(win, defaultPos, miniwin.create_absolute_location, true)
+    WindowCreate(win, info.window_left, info.window_top, gaugeWidth, gaugeHeight,
+        info.window_mode, info.window_flags, BACKGROUND_COLOUR)
+
+    movewindow.add_drag_handler(win, 0, 0, 0, TITLE_HEIGHT)
+
+    return info
+end
+
+function DrawGauge(win, label, percent, stops)
+
+    WINDOW_WIDTH, WINDOW_HEIGHT = GaugeDimensions(win)
+    local fitRadius = math.floor(math.min((WINDOW_WIDTH - 28) / 2 - 6, (WINDOW_HEIGHT - TITLE_HEIGHT - 20) / 2 - 4))
+    RADIUS = math.max(22, math.min(54, fitRadius))
+    DIAL_RADIUS = RADIUS + 6
+
+    local alertThreshold
+
+    if label == "HP" then
+        alertThreshold = hpAlertThreshold
+    else
+        alertThreshold = mpAlertThreshold
+    end
+
+    local alertActive =
+        alertThreshold > 0
+        and
+        percent <= alertThreshold
+
+    WindowRectOp(
+        win,
+        miniwin.rect_fill,
+        0,
+        0,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        BACKGROUND_COLOUR
+    )
+
+    WindowRectOp(
+        win,
+        miniwin.rect_frame,
+        0,
+        0,
+        0,
+        0,
+        BORDER_COLOUR
+    )
+
+    --------------------------------------------------
+    -- Title bar
+    --------------------------------------------------
+
+    local titleBarColour =
+        TITLE_BAR_COLOUR
+
+    local titleTextColour =
+        TITLE_TEXT_COLOUR
+
+    local titleText =
+        label
+
+    if alertActive then
+
+        if alertFlashOn then
+            titleBarColour = ALERT_RED
+            titleTextColour = ColourNameToRGB("#000000")
+        else
+            titleBarColour = ALERT_DARK_RED
+            titleTextColour = ALERT_BRIGHT
+        end
+
+        titleText =
+            label .. "  ALERT"
+    end
+
+    WindowRectOp(
+        win,
+        miniwin.rect_fill,
+        0,
+        0,
+        WINDOW_WIDTH,
+        TITLE_HEIGHT,
+        titleBarColour
+    )
+
+    WindowText(
+        win,
+        "title"..win,
+        titleText,
+        8,
+        3,
+        0,
+        0,
+        titleTextColour,
+        false
+    )
+
+    local centerX = WINDOW_WIDTH / 2
+    local centerY = TITLE_HEIGHT + 8 + RADIUS
+
+    --------------------------------------------------
+    -- Circular cockpit-style dial behind the gauge.
+    --------------------------------------------------
+
+    DrawDialFace(
+        win,
+        centerX,
+        centerY
+    )
+
+    --------------------------------------------------
+    -- Alert ring flashes independently of the current
+    -- terminal theme.
+    --------------------------------------------------
+
+    if alertActive then
+
+        local alertRingColour
+
+        if alertFlashOn then
+            alertRingColour = ALERT_RED
+        else
+            alertRingColour = ALERT_DARK_RED
+        end
+
+        WindowCircleOp(
+            win,
+            miniwin.circle_ellipse,
+            centerX - DIAL_RADIUS - 3,
+            centerY - DIAL_RADIUS - 3,
+            centerX + DIAL_RADIUS + 3,
+            centerY + DIAL_RADIUS + 3,
+            alertRingColour,
+            miniwin.pen_solid,
+            3,
+            0,
+            miniwin.brush_null
+        )
+    end
+
+    --------------------------------------------------
+    -- Full semicircular track
+    --------------------------------------------------
+
+    DrawArc(
+        win,
+        centerX,
+        centerY,
+        RADIUS,
+        180,
+        0,
+        TRACK_COLOUR,
+        5
+    )
+
+    local fillAngle =
+        AngleForPercent(
+            percent
+        )
+
+    local fillColour
+    local needleColour
+
+    if label == "HP" then
+
+        --------------------------------------------------
+        -- HP remains semantically colour-coded regardless
+        -- of terminal theme.
+        --------------------------------------------------
+
+        fillColour =
+            ColourForPercent(
+                percent,
+                HP_STOPS
+            )
+
+        needleColour =
+            HPNeedleColour(
+                percent
+            )
+
+    else
+
+        --------------------------------------------------
+        -- MP keeps its original gradient in Default.
+        -- Amber/Green use the selected terminal phosphor.
+        --------------------------------------------------
+
+        fillColour =
+            MPGaugeColour(
+                percent
+            )
+
+        needleColour =
+            fillColour
+
+    end
+
+    --------------------------------------------------
+    -- Active portion of track
+    --------------------------------------------------
+
+    DrawArc(
+        win,
+        centerX,
+        centerY,
+        RADIUS,
+        180,
+        fillAngle,
+        fillColour,
+        7
+    )
+
+    --------------------------------------------------
+    -- Five major ticks
+    --------------------------------------------------
+
+    for _, tickPercent in ipairs(
+        {0, 25, 50, 75, 100}
+    ) do
+
+        local angle =
+            AngleForPercent(
+                tickPercent
+            )
+
+        DrawTick(
+            win,
+            centerX,
+            centerY,
+            angle,
+            RADIUS + 2,
+            RADIUS + 8,
+            TICK_COLOUR
+        )
+    end
+
+    --------------------------------------------------
+    -- Additional small ticks give it a more mechanical
+    -- instrument feel without making the face busy.
+    --------------------------------------------------
+
+    for tickPercent = 10, 90, 10 do
+
+        if tickPercent % 25 ~= 0 then
+
+            local angle =
+                AngleForPercent(
+                    tickPercent
+                )
+
+            DrawTick(
+                win,
+                centerX,
+                centerY,
+                angle,
+                RADIUS + 4,
+                RADIUS + 7,
+                TICK_COLOUR
+            )
+
+        end
+
+    end
+
+    --------------------------------------------------
+    -- Needle
+    --------------------------------------------------
+
+    DrawNeedle(
+        win,
+        centerX,
+        centerY,
+        fillAngle,
+        RADIUS * 0.82,
+        needleColour
+    )
+
+    --------------------------------------------------
+    -- Hub: dark outer cap + themed inner cap
+    --------------------------------------------------
+
+    WindowCircleOp(
+        win,
+        miniwin.circle_ellipse,
+        centerX - 5,
+        centerY - 5,
+        centerX + 5,
+        centerY + 5,
+        DIAL_INNER_COLOUR,
+        miniwin.pen_solid,
+        1,
+        DIAL_INNER_COLOUR,
+        miniwin.brush_solid
+    )
+
+    WindowCircleOp(
+        win,
+        miniwin.circle_ellipse,
+        centerX - 3,
+        centerY - 3,
+        centerX + 3,
+        centerY + 3,
+        HUB_COLOUR,
+        miniwin.pen_solid,
+        1,
+        HUB_COLOUR,
+        miniwin.brush_solid
+    )
+
+    --------------------------------------------------
+    -- Numeric readout
+    --------------------------------------------------
+
+    local readoutText =
+        tostring(
+            math.floor(
+                percent + 0.5
+            )
+        ) ..
+        "%"
+
+    local textWidth =
+        WindowTextWidth(
+            win,
+            "body"..win,
+            readoutText
+        )
+
+    local readoutColour =
+        fillColour
+
+    if alertActive and alertFlashOn then
+        readoutColour = ALERT_RED
+    end
+
+    WindowText(
+        win,
+        "body"..win,
+        readoutText,
+        centerX - (textWidth / 2),
+        centerY + 18,
+        0,
+        0,
+        readoutColour,
+        false
+    )
+
+    InstallGaugeHotspot(
+        win,
+        win == HPWin and "hp_use_high_potion" or "mp_use_high_ether",
+        win == HPWin and "UseHighPotion" or "UseHighEther",
+        win == HPWin and "Use a High Potion (use item hipotion)" or "Use a High Ether (use item hiether)"
+    )
+    InstallGaugeResizeHandle(win)
+
+    WindowShow(
+        win,
+        gaugesVisible
+    )
+
+    Redraw()
+end
+
+--------------------------------------------------
+-- Trigger handler
+--------------------------------------------------
+
+lastHP = 100
+lastMP = 100
+
+-- Return only an observed HP value, never the initial display placeholder.
+function GetCurrentHPPercent()
+    if hasHPReading then
+        return lastHP
+    end
+    return nil
+end
+
+function OnConditionLine(name, line, wildcards)
+    local hp = tonumber(wildcards[1])
+    local mp = tonumber(wildcards[2])
+
+    if hp then
+        lastHP = hp
+        hasHPReading = true
+
+        DrawGauge(
+            HPWin,
+            "HP",
+            hp,
+            HP_STOPS
+        )
+
+        --------------------------------------------------
+        -- Share the exact HP percentage already parsed by this
+        -- proven gauge trigger.
+        --------------------------------------------------
+
+        BroadcastPlugin(
+            HP_PERCENT_BROADCAST_MESSAGE,
+            tostring(
+                hp
+            )
+        )
+    end
+
+    if mp then
+        lastMP = mp
+        DrawGauge(MPWin, "MP", mp, MP_STOPS)
+    end
+end
+
+--------------------------------------------------
+-- Plugin lifecycle
+--------------------------------------------------
+
+function OnPluginInstall()
+    LoadTheme()
+
+    hpWindowInfo = CreateGaugeWindow(HPWin, miniwin.pos_top_right)
+    mpWindowInfo = CreateGaugeWindow(MPWin, miniwin.pos_bottom_right)
+
+    InstallGaugeHotspot(
+        HPWin,
+        "hp_use_high_potion",
+        "UseHighPotion",
+        "Use a High Potion (use item hipotion)"
+    )
+
+    InstallGaugeHotspot(
+        MPWin,
+        "mp_use_high_ether",
+        "UseHighEther",
+        "Use a High Ether (use item hiether)"
+    )
+
+    DrawGauge(HPWin, "HP", lastHP, HP_STOPS)
+    DrawGauge(MPWin, "MP", lastMP, MP_STOPS)
+end
+
+function OnPluginSaveState()
+    SaveGaugeDimensions()
+    movewindow.save_state(HPWin)
+    movewindow.save_state(MPWin)
+
+    SetVariable(
+        "hpAlertThreshold",
+        tostring(hpAlertThreshold)
+    )
+
+    SetVariable(
+        "mpAlertThreshold",
+        tostring(mpAlertThreshold)
+    )
+end
+
+function OnPluginEnable()
+    LoadTheme()
+
+    DrawGauge(HPWin, "HP", lastHP, HP_STOPS)
+    DrawGauge(MPWin, "MP", lastMP, MP_STOPS)
+
+    WindowShow(HPWin, gaugesVisible)
+    WindowShow(MPWin, gaugesVisible)
+end
+
+function OnPluginDisable()
+    WindowShow(HPWin, false)
+    WindowShow(MPWin, false)
+end
+
+function gauges_show(name, line, wildcards)
+    gaugesVisible = true
+    WindowShow(HPWin, true)
+    WindowShow(MPWin, true)
+    ColourNote("yellow", "", "Gauges shown.")
+end
+
+function gauges_hide(name, line, wildcards)
+    gaugesVisible = false
+    WindowShow(HPWin, false)
+    WindowShow(MPWin, false)
+    ColourNote("yellow", "", "Gauges hidden.")
+end
+
+
+--------------------------------------------------
+-- ALERT CONFIGURATION
+--------------------------------------------------
+
+function SetAlertThreshold(which, value)
+
+    value =
+        tonumber(value)
+
+    if not value then
+        return
+    end
+
+    value =
+        math.floor(value)
+
+    if value < 0 or value > 100 then
+
+        ColourNote(
+            "red",
+            "",
+            "Alert percentage must be between 0 and 100."
+        )
+
+        return
+    end
+
+    if which == "HP" then
+
+        hpAlertThreshold =
+            value
+
+        SetVariable(
+            "hpAlertThreshold",
+            tostring(value)
+        )
+
+    else
+
+        mpAlertThreshold =
+            value
+
+        SetVariable(
+            "mpAlertThreshold",
+            tostring(value)
+        )
+
+    end
+
+    DrawGauge(
+        HPWin,
+        "HP",
+        lastHP,
+        HP_STOPS
+    )
+
+    DrawGauge(
+        MPWin,
+        "MP",
+        lastMP,
+        MP_STOPS
+    )
+
+    if value == 0 then
+
+        ColourNote(
+            "yellow",
+            "",
+            which ..
+            " alert disabled."
+        )
+
+    else
+
+        ColourNote(
+            "yellow",
+            "",
+            which ..
+            " alert set to " ..
+            tostring(value) ..
+            "%."
+        )
+
+    end
+end
+
+
+function alert_hp(
+    name,
+    line,
+    wildcards
+)
+
+    SetAlertThreshold(
+        "HP",
+        wildcards[1]
+    )
+end
+
+
+function alert_mp(
+    name,
+    line,
+    wildcards
+)
+
+    SetAlertThreshold(
+        "MP",
+        wildcards[1]
+    )
+end
+
+
+function alert_status(
+    name,
+    line,
+    wildcards
+)
+
+    ColourNote(
+        "yellow",
+        "",
+        "Gauge alerts: HP " ..
+        tostring(hpAlertThreshold) ..
+        "%, MP " ..
+        tostring(mpAlertThreshold) ..
+        "%."
+    )
+end
+
+
+--------------------------------------------------
+-- ALERT FLASH TIMER
+--------------------------------------------------
+
+function GaugeAlertTick()
+
+    local hpAlert =
+        hpAlertThreshold > 0
+        and
+        lastHP <= hpAlertThreshold
+
+    local mpAlert =
+        mpAlertThreshold > 0
+        and
+        lastMP <= mpAlertThreshold
+
+    if not hpAlert and not mpAlert then
+
+        if alertFlashOn then
+            alertFlashOn = false
+        end
+
+        return
+    end
+
+    alertFlashOn =
+        not alertFlashOn
+
+    if hpAlert then
+        DrawGauge(
+            HPWin,
+            "HP",
+            lastHP,
+            HP_STOPS
+        )
+    end
+
+    if mpAlert then
+        DrawGauge(
+            MPWin,
+            "MP",
+            lastMP,
+            MP_STOPS
+        )
+    end
+end
+
+
+--------------------------------------------------
+-- THEME BROADCAST
+--------------------------------------------------
+
+function OnPluginBroadcast(
+    msg,
+    id,
+    name,
+    text
+)
+
+    if msg ~= THEME_BROADCAST_MESSAGE then
+        return
+    end
+
+    if id ~= THEME_CONTROLLER_ID then
+        return
+    end
+
+    LoadTheme()
+
+    DrawGauge(
+        HPWin,
+        "HP",
+        lastHP,
+        HP_STOPS
+    )
+
+    DrawGauge(
+        MPWin,
+        "MP",
+        lastMP,
+        MP_STOPS
+    )
+end
+
+
+
+--------------------------------------------------
+-- PLUGIN CONTROLLER LAYOUT API
+--------------------------------------------------
+
+function ManagedLayoutParse(spec)
+    local windowName, sx, sy, sw, sh =
+        tostring(spec or ""):match("^([^\t]+)\t(-?%d+)\t(-?%d+)\t(%d+)\t(%d+)$")
+    if not windowName then return nil end
+    return windowName, tonumber(sx), tonumber(sy), tonumber(sw), tonumber(sh)
+end
+
+function ManagedLayoutSetMoveWindowInfo(info, winName, x, y)
+    if type(info) ~= "table" then return end
+    info.window_left = x
+    info.window_top = y
+    info.window_mode = tonumber(WindowInfo(winName, 7)) or info.window_mode or miniwin.pos_top_left
+    info.window_flags = tonumber(WindowInfo(winName, 8)) or info.window_flags or miniwin.create_absolute_location
+end
+
+function GetManagedLayoutWindows()
+    return HPWin .. string.char(30) .. MPWin
+end
+
+function ApplyManagedLayout(spec)
+    local windowName, x, y, w, h = ManagedLayoutParse(spec)
+    if windowName ~= HPWin and windowName ~= MPWin then return "wrong window" end
+
+    SetGaugeDimensions(windowName, w, h)
+    SaveGaugeDimensions()
+
+    -- The layout API must resize the REAL miniwindow, not just the
+    -- variables used by DrawGauge(). Otherwise the resize grip is
+    -- installed beyond the physical window edge.
+    local physicalW, physicalH = GaugeDimensions(windowName)
+    WindowResize(
+        windowName,
+        physicalW,
+        physicalH,
+        BACKGROUND_COLOUR
+    )
+
+    local info
+    if windowName == HPWin then
+        info = hpWindowInfo
+    else
+        info = mpWindowInfo
+    end
+
+    ManagedLayoutSetMoveWindowInfo(info, windowName, x, y)
+
+    if windowName == HPWin then
+        DrawGauge(HPWin, "HP", lastHP, HP_STOPS)
+    else
+        DrawGauge(MPWin, "MP", lastMP, MP_STOPS)
+    end
+
+    local mode = type(info) == "table" and info.window_mode or miniwin.pos_top_left
+    local flags = type(info) == "table" and info.window_flags or miniwin.create_absolute_location
+    WindowPosition(windowName, x, y, mode, flags)
+    if movewindow then movewindow.save_state(windowName) end
+    pcall(SaveState)
+    Redraw()
+    return "ok"
+end
+
+]]>
+</script>
+</muclient>

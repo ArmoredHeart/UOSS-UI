@@ -1,0 +1,443 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+
+<muclient>
+    <plugin
+    name="Chakra_Cooldown"
+    author="Claude / modified by ChatGPT"
+    id="b27a41c9f0e34d8ab6023117"
+    language="Lua"
+    purpose="Shows a small cockpit-style indicator light for Chakra cooldown status"
+    date_written="2026-09-06"
+    version="2.4"
+    save_state="y"
+    >
+
+<description trim="y">
+USAGE:
+
+  chakra show   : show the cooldown window
+  chakra hide   : hide the cooldown window
+
+Automatically catches:
+  You close your eyes and concentrate, and suddenly appear healthier.
+    -> light becomes unlit / cooldown
+
+  You can use Chakra again.
+    -> light becomes lit / ready
+
+Default theme preserves the original red/green states.
+Amber and Green themes use lit/unlit lamps in the selected phosphor colour.
+
+Modular theme client: colours are supplied by UI_Theme_Controller v2.0 when available.
+</description>
+
+</plugin>
+
+<triggers>
+    <trigger
+    script="ChakraUsed"
+    match="^You close your eyes and concentrate, and suddenly appear healthier\.$"
+    regexp="y"
+    ignore_case="y"
+    enabled="y"
+    sequence="100"
+    ></trigger>
+
+    <trigger
+    script="ChakraReady"
+    match="^You can use Chakra again\.$"
+    regexp="y"
+    ignore_case="y"
+    enabled="y"
+    sequence="100"
+    ></trigger>
+</triggers>
+
+<aliases>
+    <alias
+    script="chakra_show"
+    match="^chakra show$"
+    regexp="y"
+    ignore_case="y"
+    enabled="y"
+    sequence="100"
+    ></alias>
+
+    <alias
+    script="chakra_hide"
+    match="^chakra hide$"
+    regexp="y"
+    ignore_case="y"
+    enabled="y"
+    sequence="100"
+    ></alias>
+</aliases>
+
+<script>
+<![CDATA[
+
+require "movewindow"
+
+Win = GetPluginID()
+
+-- Narrower than before - previous version's bezel math overflowed
+-- the window edges since it didn't account for the bezel padding
+-- extending OUTWARD beyond the lamp's own diameter.
+WINDOW_WIDTH = 140
+WINDOW_HEIGHT = 155
+TITLE_HEIGHT = 18
+TITLE_FONT_NAME = "Lucida Console"
+TITLE_FONT_SIZE = 9
+LIGHT_MARGIN = 10
+
+--------------------------------------------------
+-- SHARED UI THEMES
+--------------------------------------------------
+
+THEME_CONTROLLER_ID =
+    "43c8d047be7a418ba5e86916"
+
+THEME_BROADCAST_MESSAGE = 9042
+
+
+--------------------------------------------------
+-- MODULAR THEME CLIENT
+--
+-- The controller owns the real palette. The local THEMES table
+-- below is retained only as a safe fallback if the controller
+-- is unavailable.
+--------------------------------------------------
+
+local THEME_PROFILE =
+    "chakra"
+
+
+function ThemeColour(
+    role,
+    fallback
+)
+
+    local rc,
+          value =
+        CallPlugin(
+            THEME_CONTROLLER_ID,
+            "GetThemeColour",
+            THEME_PROFILE,
+            role
+        )
+
+
+    if rc ==
+       error_code.eOK and
+       type(
+           value
+       ) ==
+       "string" and
+       value ~=
+       ""
+    then
+
+        return
+            ColourNameToRGB(
+                value
+            )
+
+    end
+
+
+    return
+        ColourNameToRGB(
+            fallback
+        )
+end
+
+
+THEMES = {
+
+    default = {
+        background = "#000000",
+        border = "#E8E8E8",
+        title_bar = "#202020",
+        title_text = "#D4D0C8",
+        bezel_fill = "#2A2A2A",
+        bezel_border = "#000000",
+
+        ready_outer = "#0D4D1A",
+        ready_middle = "#1F9E3D",
+        ready_inner = "#4DFF6E",
+        ready_highlight = "#CFFFD9",
+
+        cooldown_outer = "#4D0D0D",
+        cooldown_middle = "#9E1F1F",
+        cooldown_inner = "#FF4D4D",
+        cooldown_highlight = "#FFD9D9"
+    },
+
+    amber = {
+        background = "#050301",
+        border = "#6B3D18",
+        title_bar = "#160B03",
+        title_text = "#FFB347",
+        bezel_fill = "#24160B",
+        bezel_border = "#050301",
+
+        ready_outer = "#6B3308",
+        ready_middle = "#C66A12",
+        ready_inner = "#FF9D26",
+        ready_highlight = "#FFE0A3",
+
+        cooldown_outer = "#201207",
+        cooldown_middle = "#35200D",
+        cooldown_inner = "#4A2A0D",
+        cooldown_highlight = "#69401B"
+    },
+
+    green = {
+        background = "#000500",
+        border = "#285B28",
+        title_bar = "#061306",
+        title_text = "#9AFF82",
+        bezel_fill = "#102010",
+        bezel_border = "#000500",
+
+        ready_outer = "#0D4D1A",
+        ready_middle = "#1F9E3D",
+        ready_inner = "#4DFF6E",
+        ready_highlight = "#CFFFD9",
+
+        cooldown_outer = "#061507",
+        cooldown_middle = "#0B2910",
+        cooldown_inner = "#123B17",
+        cooldown_highlight = "#20582A"
+    }
+}
+
+function LoadTheme()
+
+    local theme =
+        GetPluginVariable(
+            THEME_CONTROLLER_ID,
+            "theme"
+        )
+
+    if not THEMES[theme] then
+        theme = "default"
+    end
+
+    local T = THEMES[theme]
+
+    BACKGROUND_COLOUR = ThemeColour("background", T.background)
+    BORDER_COLOUR = ThemeColour("border", T.border)
+    TITLE_BAR_COLOUR = ThemeColour("title_bar", T.title_bar)
+    TITLE_TEXT_COLOUR = ThemeColour("title_text", T.title_text)
+
+    BEZEL_FILL = ThemeColour("bezel_fill", T.bezel_fill)
+    BEZEL_BORDER = ThemeColour("bezel_border", T.bezel_border)
+
+    READY_OUTER = ThemeColour("ready_outer", T.ready_outer)
+    READY_MIDDLE = ThemeColour("ready_middle", T.ready_middle)
+    READY_INNER = ThemeColour("ready_inner", T.ready_inner)
+    READY_HIGHLIGHT = ThemeColour("ready_highlight", T.ready_highlight)
+
+    COOLDOWN_OUTER = ThemeColour("cooldown_outer", T.cooldown_outer)
+    COOLDOWN_MIDDLE = ThemeColour("cooldown_middle", T.cooldown_middle)
+    COOLDOWN_INNER = ThemeColour("cooldown_inner", T.cooldown_inner)
+    COOLDOWN_HIGHLIGHT = ThemeColour("cooldown_highlight", T.cooldown_highlight)
+end
+
+LoadTheme()
+
+windowinfo = ""
+
+-- persisted across sessions - assume ready to start unless we've seen otherwise
+chakraReady = GetVariable("chakraReady")
+if chakraReady == nil then
+    chakraReady = true
+else
+    chakraReady = (chakraReady == "true")
+end
+
+function UseChakra(
+    flags,
+    hotspot_id
+)
+
+    Send("use punchart chakra")
+end
+
+
+function OnPluginInstall()
+    LoadTheme()
+
+    check(WindowCreate(Win, 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT, 0, 0, BACKGROUND_COLOUR))
+    check(WindowFont(Win, "title"..Win, TITLE_FONT_NAME, TITLE_FONT_SIZE, true))
+
+    windowinfo = movewindow.install(Win, miniwin.pos_top_right, miniwin.create_absolute_location, true)
+    WindowCreate(Win, windowinfo.window_left, windowinfo.window_top, WINDOW_WIDTH, WINDOW_HEIGHT,
+        windowinfo.window_mode, windowinfo.window_flags, BACKGROUND_COLOUR)
+
+    movewindow.add_drag_handler(
+        Win,
+        0,
+        0,
+        WINDOW_WIDTH,
+        TITLE_HEIGHT
+    )
+
+    WindowAddHotspot(
+        Win,
+        "chakra_use",
+        0,
+        TITLE_HEIGHT,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        "",
+        "",
+        "",
+        "",
+        "UseChakra",
+        "Use Chakra",
+        miniwin.cursor_hand,
+        0
+    )
+
+    Redraw_Window()
+    WindowShow(Win, true)
+end
+
+function OnPluginSaveState()
+    movewindow.save_state(Win)
+    SetVariable("chakraReady", tostring(chakraReady))
+end
+
+function OnPluginEnable()
+    LoadTheme()
+    Redraw_Window()
+    WindowShow(Win, true)
+end
+
+function OnPluginDisable()
+    WindowShow(Win, false)
+end
+
+-- Draws the lamp as three concentric flat circles (dark -> bright)
+-- to fake a soft radial glow, plus a small pale highlight offset
+-- toward the upper-left for a glossy, physical-light look.
+function DrawLamp(left, top, right, bottom, outerColour, middleColour, innerColour, highlightColour)
+
+    local width = right - left
+    local height = bottom - top
+
+    WindowCircleOp(Win, miniwin.circle_ellipse, left, top, right, bottom,
+        outerColour, miniwin.pen_null, 0, outerColour, miniwin.brush_solid)
+
+    local midInset = width * 0.18
+    WindowCircleOp(Win, miniwin.circle_ellipse,
+        left + midInset, top + midInset, right - midInset, bottom - midInset,
+        middleColour, miniwin.pen_null, 0, middleColour, miniwin.brush_solid)
+
+    local innerInset = width * 0.38
+    WindowCircleOp(Win, miniwin.circle_ellipse,
+        left + innerInset, top + innerInset, right - innerInset, bottom - innerInset,
+        innerColour, miniwin.pen_null, 0, innerColour, miniwin.brush_solid)
+
+    local hlDiameter = width * 0.26
+    local hlLeft = left + (width * 0.15)
+    local hlTop = top + (height * 0.13)
+    WindowCircleOp(Win, miniwin.circle_ellipse,
+        hlLeft, hlTop, hlLeft + hlDiameter, hlTop + hlDiameter,
+        highlightColour, miniwin.pen_null, 0, highlightColour, miniwin.brush_solid)
+
+end
+
+function Redraw_Window()
+    WindowRectOp(Win, miniwin.rect_fill, 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT, BACKGROUND_COLOUR)
+    WindowRectOp(Win, miniwin.rect_frame, 0, 0, 0, 0, BORDER_COLOUR)
+
+    -- title bar
+    WindowRectOp(Win, miniwin.rect_fill, 0, 0, WINDOW_WIDTH, TITLE_HEIGHT, TITLE_BAR_COLOUR)
+    WindowText(Win, "title"..Win, "CHAKRA", 8, 3, 0, 0, TITLE_TEXT_COLOUR, false)
+
+    -- Solve for a lamp diameter such that the BEZEL (lamp + padding
+    -- on every side) fits within the available space - the previous
+    -- version only checked the lamp itself, so the bezel padding
+    -- pushed past the window edges.
+    local availableWidth = WINDOW_WIDTH - (LIGHT_MARGIN * 2)
+    local availableHeight = WINDOW_HEIGHT - TITLE_HEIGHT - (LIGHT_MARGIN * 2)
+    local availableSpace = math.min(availableWidth, availableHeight)
+
+    local bezelFactor = 0.15  -- bezel padding as a fraction of lamp diameter
+    local diameter = availableSpace / (1 + (bezelFactor * 2))
+
+    local lampLeft = (WINDOW_WIDTH - diameter) / 2
+    local lampTop = TITLE_HEIGHT + ((WINDOW_HEIGHT - TITLE_HEIGHT - diameter) / 2)
+    local lampRight = lampLeft + diameter
+    local lampBottom = lampTop + diameter
+
+    local bezelPad = diameter * bezelFactor
+
+    WindowCircleOp(Win, miniwin.circle_ellipse,
+        lampLeft - bezelPad, lampTop - bezelPad,
+        lampRight + bezelPad, lampBottom + bezelPad,
+        BEZEL_BORDER, miniwin.pen_solid, 1,
+        BEZEL_FILL, miniwin.brush_solid)
+
+    if chakraReady then
+        DrawLamp(lampLeft, lampTop, lampRight, lampBottom,
+            READY_OUTER, READY_MIDDLE, READY_INNER, READY_HIGHLIGHT)
+    else
+        DrawLamp(lampLeft, lampTop, lampRight, lampBottom,
+            COOLDOWN_OUTER, COOLDOWN_MIDDLE, COOLDOWN_INNER, COOLDOWN_HIGHLIGHT)
+    end
+
+    Redraw()
+end
+
+function ChakraUsed(name, line, wildcards)
+    chakraReady = false
+    Redraw_Window()
+end
+
+function ChakraReady(name, line, wildcards)
+    chakraReady = true
+    Redraw_Window()
+end
+
+function chakra_show(name, line, wildcards)
+    WindowShow(Win, true)
+    ColourNote("yellow", "", "Chakra window shown. Type 'chakra hide' to hide it.")
+end
+
+function chakra_hide(name, line, wildcards)
+    WindowShow(Win, false)
+    ColourNote("yellow", "", "Chakra window hidden. Type 'chakra show' to see it again.")
+end
+
+
+--------------------------------------------------
+-- THEME BROADCAST
+--------------------------------------------------
+
+function OnPluginBroadcast(
+    msg,
+    id,
+    name,
+    text
+)
+
+    if msg ~= THEME_BROADCAST_MESSAGE then
+        return
+    end
+
+    if id ~= THEME_CONTROLLER_ID then
+        return
+    end
+
+    LoadTheme()
+    Redraw_Window()
+end
+
+]]>
+</script>
+</muclient>

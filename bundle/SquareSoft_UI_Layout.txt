@@ -1,0 +1,20 @@
+# SquareSoft UI Layout
+# format=2
+# generated=2026-09-14 02:55:56
+# output_width=1899
+# output_height=968
+# monitor_width=1920
+# monitor_height=1080
+# gutter_left=390
+# gutter_right=850
+# Fields: WINDOW|kind|plugin_id|plugin_name|window_name|x|y|width|height|mode|flags|background
+WINDOW|managed|91c7e4a23bf84d1aa0e9c562|Status Effect Tracker|91c7e4a23bf84d1aa0e9c562|0|722|195|193|6|2|1280
+WINDOW|managed|a1e4bf29c1a8477fa19b2201|XP / AP / Gold Rates|a1e4bf29c1a8477fa19b2201|0|0|380|207|0|2|1280
+WINDOW|managed|a1b2c3d4e5f60718293a4b5c|Exit Compass|ExitWindow|-11|428|400|288|4|2|1280
+WINDOW|managed|6a941f23b8ce4a2d9e7051bc|Travel Shortcuts|6a941f23b8ce4a2d9e7051bc|0|209|390|216|6|2|1280
+WINDOW|managed|d47f6a92e1b83c5f0a9e2716|HP / MP Gauges|d47f6a92e1b83c5f0a9e2716_hp|232|717|157|166|6|2|1280
+WINDOW|managed|d47f6a92e1b83c5f0a9e2716|HP / MP Gauges|d47f6a92e1b83c5f0a9e2716_mp|194|857|140|155|8|2|1280
+WINDOW|managed|c39d5271e8a04f6b9c418823|Enemy Bestiary Tracker|c39d5271e8a04f6b9c418823|1050|594|847|375|8|2|1280
+WINDOW|managed|7f3e21b0a94d4d73b87c34e2|World Map Window|7f3e21b0a94d4d73b87c34e2|1368|152|215|224|0|2|1280
+WINDOW|managed|a7c3e91b4d6f2085c1e73a9d|SquareSoft Automapper|a7c3e91b4d6f2085c1e73a9d|1049|0|850|596|6|2|1280
+WINDOW|generic_chat|10778718503f0c91106745f5|Generic Chat / Communication|10778718503f0c91106745f5|388|0|655|210|6|2|1280

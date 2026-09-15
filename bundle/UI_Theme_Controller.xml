@@ -1,0 +1,544 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+<muclient>
+<plugin
+    name="UI_Theme_Controller"
+    author="ChatGPT"
+    id="43c8d047be7a418ba5e86916"
+    language="Lua"
+    purpose="Shared SquareSoft UI theme controller"
+    date_written="2026-09-14"
+    version="2.2"
+    save_state="y"
+>
+<description trim="y">
+<![CDATA[
+SQUARESOFT UI THEME CONTROLLER v2.2
+
+Public themes:
+  theme default   - GREEN TERMINAL palette (the old "green")
+  theme classic   - ORIGINAL gray/gold palette (the old "default")
+  theme amber     - amber terminal palette
+
+There is no separate public "green" theme anymore: its palette IS "default".
+The former "default" palette has been moved to "classic".
+  theme status
+
+For backward compatibility, "theme green" is accepted as a deprecated synonym
+for "theme default".
+
+On first upgrade with the same plugin ID, saved names are migrated:
+  old green   -> default
+  old default -> classic
+]]>
+</description>
+</plugin>
+
+<aliases>
+  <alias name="Theme_Command" script="ThemeCommand"
+         match="^theme(?:\s+(default|classic|amber|green|status))?$"
+         regexp="y" ignore_case="y" enabled="y" sequence="10"></alias>
+</aliases>
+
+<script>
+<![CDATA[
+THEME_BROADCAST_MESSAGE = 9042
+
+PALETTES = {
+    autobuff = {
+        default = {
+            background = "#000500",
+            border = "#285B28",
+            title_bar = "#061306",
+            title_text = "#9AFF82",
+            label = "#67C967",
+            row_separator = "#102A10",
+            bezel_fill = "#102010",
+            bezel_border = "#000500",
+            on_outer = "#0D4D1A",
+            on_middle = "#1F9E3D",
+            on_inner = "#4DFF6E",
+            on_highlight = "#CFFFD9",
+            off_outer = "#061507",
+            off_middle = "#0B2910",
+            off_inner = "#123B17",
+            off_highlight = "#20582A",
+        },
+        classic = {
+            background = "#000000",
+            border = "#808080",
+            title_bar = "darkslategray",
+            title_text = "gold",
+            label = "#D4D0C8",
+            row_separator = "#282828",
+            bezel_fill = "#2A2A2A",
+            bezel_border = "#000000",
+            on_outer = "#0D4D1A",
+            on_middle = "#1F9E3D",
+            on_inner = "#4DFF6E",
+            on_highlight = "#CFFFD9",
+            off_outer = "#4D0D0D",
+            off_middle = "#9E1F1F",
+            off_inner = "#FF4D4D",
+            off_highlight = "#FFD9D9",
+        },
+        amber = {
+            background = "#050301",
+            border = "#6B3D18",
+            title_bar = "#160B03",
+            title_text = "#FFB347",
+            label = "#D9822B",
+            row_separator = "#2D1809",
+            bezel_fill = "#24160B",
+            bezel_border = "#050301",
+            on_outer = "#6B3308",
+            on_middle = "#C66A12",
+            on_inner = "#FF9D26",
+            on_highlight = "#FFE0A3",
+            off_outer = "#201207",
+            off_middle = "#35200D",
+            off_inner = "#4A2A0D",
+            off_highlight = "#69401B",
+        },
+    },
+    bestiary = {
+        default = {
+            background = "#000500",
+            border = "#285B28",
+            title_bar = "#061306",
+            title = "#9AFF82",
+            label = "#67C967",
+            name = "#C2FFAE",
+            none = "#285328",
+            unscanned = "#8FEF73",
+            separator = "#102A10",
+        },
+        classic = {
+            background = "#17191C",
+            border = "#E8E8E8",
+            title_bar = "#292C30",
+            title = "#E2E2E2",
+            label = "#D4D0C8",
+            name = "#FFFFFF",
+            none = "#858585",
+            unscanned = "#FFAA44",
+            separator = "#44484D",
+        },
+        amber = {
+            background = "#050301",
+            border = "#6B3D18",
+            title_bar = "#160B03",
+            title = "#FFB347",
+            label = "#D9822B",
+            name = "#FFD18A",
+            none = "#6D421C",
+            unscanned = "#FF9D26",
+            separator = "#2D1809",
+        },
+    },
+    chakra = {
+        default = {
+            background = "#000500",
+            border = "#285B28",
+            title_bar = "#061306",
+            title_text = "#9AFF82",
+            bezel_fill = "#102010",
+            bezel_border = "#000500",
+            ready_outer = "#0D4D1A",
+            ready_middle = "#1F9E3D",
+            ready_inner = "#4DFF6E",
+            ready_highlight = "#CFFFD9",
+            cooldown_outer = "#061507",
+            cooldown_middle = "#0B2910",
+            cooldown_inner = "#123B17",
+            cooldown_highlight = "#20582A",
+        },
+        classic = {
+            background = "#000000",
+            border = "#E8E8E8",
+            title_bar = "#202020",
+            title_text = "#D4D0C8",
+            bezel_fill = "#2A2A2A",
+            bezel_border = "#000000",
+            ready_outer = "#0D4D1A",
+            ready_middle = "#1F9E3D",
+            ready_inner = "#4DFF6E",
+            ready_highlight = "#CFFFD9",
+            cooldown_outer = "#4D0D0D",
+            cooldown_middle = "#9E1F1F",
+            cooldown_inner = "#FF4D4D",
+            cooldown_highlight = "#FFD9D9",
+        },
+        amber = {
+            background = "#050301",
+            border = "#6B3D18",
+            title_bar = "#160B03",
+            title_text = "#FFB347",
+            bezel_fill = "#24160B",
+            bezel_border = "#050301",
+            ready_outer = "#6B3308",
+            ready_middle = "#C66A12",
+            ready_inner = "#FF9D26",
+            ready_highlight = "#FFE0A3",
+            cooldown_outer = "#201207",
+            cooldown_middle = "#35200D",
+            cooldown_inner = "#4A2A0D",
+            cooldown_highlight = "#69401B",
+        },
+    },
+    exit = {
+        default = {
+            background = "#000500",
+            panel = "#061306",
+            border = "#285B28",
+            face = "#000800",
+            outline = "#3C8A3C",
+            tick = "#4EA34E",
+            inactive = "#000800",
+            dark = "#245324",
+            gray = "#397A39",
+            dim = "#1C451C",
+            lightgray = "#67C967",
+            title = "#9AFF82",
+            active = "#67FF67",
+            active_dark = "#176B24",
+            other = "#70D970",
+        },
+        classic = {
+            background = "black",
+            panel = "darkslategray",
+            border = "gray",
+            face = "white",
+            outline = "black",
+            tick = "black",
+            inactive = "black",
+            dark = "darkgray",
+            gray = "gray",
+            dim = "dimgray",
+            lightgray = "lightgray",
+            title = "gold",
+            active = "cyan",
+            active_dark = "darkcyan",
+            other = "lightgray",
+        },
+        amber = {
+            background = "#050301",
+            panel = "#160B03",
+            border = "#6B3D18",
+            face = "#080401",
+            outline = "#A65F20",
+            tick = "#B86A24",
+            inactive = "#080401",
+            dark = "#6B3D18",
+            gray = "#9A571D",
+            dim = "#5A3213",
+            lightgray = "#D9822B",
+            title = "#FFB347",
+            active = "#FF9D26",
+            active_dark = "#7A3D08",
+            other = "#E38B30",
+        },
+    },
+    gauges = {
+        default = {
+            background = "#000500",
+            border = "#285B28",
+            title_bar = "#061306",
+            title_text = "#9AFF82",
+            dial_face = "#000900",
+            dial_outer = "#397A39",
+            dial_inner = "#1C451C",
+            track = "#0D240D",
+            tick = "#4EA34E",
+            hub = "#72DD72",
+            readout = "#9AFF82",
+            mp_active = "#67FF67",
+            mp_active_dark = "#176B24",
+        },
+        classic = {
+            background = "#000000",
+            border = "#E8E8E8",
+            title_bar = "#202020",
+            title_text = "#D4D0C8",
+            dial_face = "#101010",
+            dial_outer = "#D0D0D0",
+            dial_inner = "#505050",
+            track = "#333333",
+            tick = "#777777",
+            hub = "#CCCCCC",
+            readout = "#D4D0C8",
+            mp_active = "#64C8FF",
+            mp_active_dark = "#245C78",
+        },
+        amber = {
+            background = "#050301",
+            border = "#6B3D18",
+            title_bar = "#160B03",
+            title_text = "#FFB347",
+            dial_face = "#090501",
+            dial_outer = "#9A571D",
+            dial_inner = "#4A2910",
+            track = "#2B1708",
+            tick = "#A65F20",
+            hub = "#E38B30",
+            readout = "#FFB347",
+            mp_active = "#FF9D26",
+            mp_active_dark = "#6B3308",
+        },
+    },
+    map = {
+        default = {
+            background = "#000500",
+            border = "#285B28",
+            title_bar = "#061306",
+            title = "#9AFF82",
+        },
+        classic = {
+            background = "#000000",
+            border = "#808080",
+            title_bar = "darkslategray",
+            title = "gold",
+        },
+        amber = {
+            background = "#050301",
+            border = "#6B3D18",
+            title_bar = "#160B03",
+            title = "#FFB347",
+        },
+    },
+    status = {
+        default = {
+            background = "#000500",
+            border = "#285B28",
+            title_bar = "#061306",
+            title = "#9AFF82",
+            positive = "#67FF67",
+            negative = "#FF4D4D",
+            unknown = "#5A8B5A",
+            separator = "#102A10",
+            alert_bright = "#FF3D3D",
+            alert_dark = "#5A1010",
+            alert_text = "#D7FFD7",
+        },
+        classic = {
+            background = "#000000",
+            border = "#808080",
+            title_bar = "darkslategray",
+            title = "gold",
+            positive = "#55FF55",
+            negative = "#FF5555",
+            unknown = "#A0A0A0",
+            separator = "#282828",
+            alert_bright = "#FF3030",
+            alert_dark = "#601010",
+            alert_text = "#FFFFFF",
+        },
+        amber = {
+            background = "#050301",
+            border = "#6B3D18",
+            title_bar = "#160B03",
+            title = "#FFB347",
+            positive = "#7FFF7F",
+            negative = "#FF5A3C",
+            unknown = "#A8713A",
+            separator = "#2D1809",
+            alert_bright = "#FF3B22",
+            alert_dark = "#5C1208",
+            alert_text = "#FFD7A3",
+        },
+    },
+    travel = {
+        default = {
+            background = "#000500",
+            border = "#285B28",
+            title_bar = "#061306",
+            title = "#9AFF82",
+            text = "#70D970",
+            dim = "#285328",
+            row_hover = "#0A1C0A",
+            separator = "#102A10",
+            scroll_track = "#000A00",
+            scroll_thumb = "#2E6B2E",
+            scroll_arrow = "#9AFF82",
+        },
+        classic = {
+            background = "#000000",
+            border = "#808080",
+            title_bar = "darkslategray",
+            title = "gold",
+            text = "#D4D0C8",
+            dim = "#707070",
+            row_hover = "#202020",
+            separator = "#282828",
+            scroll_track = "#101010",
+            scroll_thumb = "#606060",
+            scroll_arrow = "#D4D0C8",
+        },
+        amber = {
+            background = "#050301",
+            border = "#6B3D18",
+            title_bar = "#160B03",
+            title = "#FFB347",
+            text = "#E38B30",
+            dim = "#6B3D18",
+            row_hover = "#241205",
+            separator = "#2D1809",
+            scroll_track = "#0C0602",
+            scroll_thumb = "#7A4318",
+            scroll_arrow = "#FFB347",
+        },
+    },
+    xp = {
+        default = {
+            background = "#000500",
+            border = "#285B28",
+            title_bar = "#061306",
+            title_text = "#9AFF82",
+            label = "#62C962",
+            xp = "#C2FFAE",
+            ap = "#72DD72",
+            gold = "#9AFF82",
+            graph_border = "#1F4B1F",
+            graph_bg = "#000800",
+            graph_grid = "#102A10",
+        },
+        classic = {
+            background = "#000000",
+            border = "#808080",
+            title_bar = "darkslategray",
+            title_text = "#FFD700",
+            label = "#D4D0C8",
+            xp = "#70FF64",
+            ap = "#64C8FF",
+            gold = "#FFD700",
+            graph_border = "#404040",
+            graph_bg = "#0A0A0A",
+            graph_grid = "#202020",
+        },
+        amber = {
+            background = "#050301",
+            border = "#6B3D18",
+            title_bar = "#160B03",
+            title_text = "#FFB347",
+            label = "#C9792A",
+            xp = "#FFD18A",
+            ap = "#E9943A",
+            gold = "#FFB347",
+            graph_border = "#5A3213",
+            graph_bg = "#080401",
+            graph_grid = "#2D1809",
+        },
+    },
+}
+
+VALID_THEMES = {
+    default = true,
+    classic = true,
+    amber = true
+}
+
+function NormalizeThemeName(name)
+    name = tostring(name or ""):lower():match("^%s*(.-)%s*$") or ""
+    if name == "green" then return "default" end
+    if VALID_THEMES[name] then return name end
+    return nil
+end
+
+function MigrateSavedThemeName()
+    -- v2.2 is the corrective rename pass:
+    --   old green   -> new default
+    --   old default -> new classic
+    --
+    -- If v2.1 was installed incompletely (for example themed clients were
+    -- updated but the old controller remained), force the intended GREEN
+    -- palette as the current default once so the suite cannot remain stuck on
+    -- the old gray/gold palette while reporting "default".
+    if GetVariable("theme_name_correction_v22") ~= "1" then
+        SetVariable("theme", "default")
+        SetVariable("effective_theme", "default")
+        SetVariable("theme_name_migration_v21", "1")
+        SetVariable("theme_name_correction_v22", "1")
+        return "default"
+    end
+
+    local existing = NormalizeThemeName(GetVariable("theme"))
+    if not existing then existing = "default" end
+    SetVariable("theme", existing)
+    SetVariable("effective_theme", existing)
+    return existing
+end
+
+function CurrentTheme()
+    local theme = NormalizeThemeName(GetVariable("theme"))
+    if not theme then theme = "default" end
+    return theme
+end
+
+function BroadcastTheme()
+    local theme = CurrentTheme()
+    SetVariable("theme", theme)
+    SetVariable("effective_theme", theme)
+    BroadcastPlugin(THEME_BROADCAST_MESSAGE, theme)
+end
+
+function SetTheme(name)
+    local requested = tostring(name or ""):lower()
+    local theme = NormalizeThemeName(requested)
+    if not theme then return false end
+
+    SetVariable("theme", theme)
+    SetVariable("effective_theme", theme)
+    SetVariable("theme_name_migration_v21", "1")
+    BroadcastTheme()
+
+    if requested == "green" then
+        ColourNote("yellow", "", "[Theme] 'green' is now named 'default'.")
+    end
+    ColourNote("lime", "", "[Theme] " .. theme)
+    return true
+end
+
+function GetThemeColour(profile, role)
+    profile = tostring(profile or ""):lower()
+    role = tostring(role or "")
+    local p = PALETTES[profile]
+    if not p then return "" end
+    local t = p[CurrentTheme()]
+    if not t then return "" end
+    return tostring(t[role] or "")
+end
+
+function GetThemeName()
+    return CurrentTheme()
+end
+
+function ThemeCommand(name, line, wildcards)
+    local arg = tostring((wildcards and wildcards[1]) or ""):lower()
+    if arg == "" or arg == "status" then
+        ColourNote("cyan", "", "[Theme] current=" .. CurrentTheme() ..
+            "  available: default, classic, amber")
+        return
+    end
+    if not SetTheme(arg) then
+        ColourNote("red", "", "[Theme] Unknown theme. Use default, classic, or amber.")
+    end
+end
+
+function OnPluginInstall()
+    MigrateSavedThemeName()
+    BroadcastTheme()
+end
+
+function OnPluginEnable()
+    MigrateSavedThemeName()
+    BroadcastTheme()
+end
+
+function OnPluginSaveState()
+    local theme = CurrentTheme()
+    SetVariable("theme", theme)
+    SetVariable("effective_theme", theme)
+end
+]]>
+</script>
+</muclient>

@@ -1,0 +1,257 @@
+<?xml version="1.1" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+
+<muclient>
+<plugin
+    name="SquareSoft_Core_Triggers"
+    author="OpenAI"
+    id="f3a9c2e71b4d4068a5c912ef"
+    language="Lua"
+    purpose="Portable SquareSoft status colouring and cooldown notices"
+    date_written="2026-09-14"
+    requires="4.73"
+    version="1.0"
+    save_state="y"
+>
+<description trim="y">
+<![CDATA[
+SQUARESOFT CORE TRIGGERS v1.1
+
+Portable replacements for SquareSoft triggers that previously lived in the
+MUSHclient world file.
+
+Included:
+  * HP current-value green -> red gradient on the <<HP: ... MP: ...>> line
+  * MP current/max cyan -> light-purple -> red gradient
+  * OVERALL CONDITION HP/SP percentage gradients
+  * red "Mob", light-green "Exp", fixed green << and >>
+  * six-line magenta "You can use chakra again." ready notice
+
+Commands:
+  ss core status
+  ss core on|off
+  ss core notices on|off
+
+All trigger names are stable and live in group SS_CORE.
+]]>
+</description>
+</plugin>
+
+<triggers>
+  <trigger
+      name="SS_CORE_STATS_HPMP"
+      group="SS_CORE"
+      script="ColourStats"
+      match="^(&lt;&lt;)(HP:\s*)(\d+)(/)(\d+)(\s*MP:\s*)(\d+)(/)(\d+)(&gt;&gt;)$"
+      regexp="y"
+      enabled="y"
+      keep_evaluating="y"
+      omit_from_output="y"
+      sequence="900"
+  ></trigger>
+
+  <trigger
+      name="SS_CORE_OVERALL_CONDITION"
+      group="SS_CORE"
+      script="ColourCondition"
+      match="^(&lt;&lt;)(OVERALL CONDITION:\s*&lt;HP:\s*)(\d+)(%&gt;\s*&lt;SP:\s*)(\d+)(%&gt;\s*&lt;)(Mob)(:\s*[^&gt;]*&gt;\s*)(Exp)(:\s*[\d.]+%\s*)(&gt;&gt;)$"
+      regexp="y"
+      enabled="y"
+      keep_evaluating="y"
+      omit_from_output="y"
+      sequence="900"
+  ></trigger>
+
+  <trigger
+      name="SS_CORE_CHAKRA_READY_NOTICE"
+      group="SS_CORE"
+      script="ChakraReadyNotice"
+      match="^You can use chakra again\.$"
+      regexp="y"
+      ignore_case="y"
+      enabled="y"
+      keep_evaluating="y"
+      omit_from_output="y"
+      sequence="910"
+  ></trigger>
+
+</triggers>
+
+<aliases>
+  <alias
+      name="SS_CORE_ENABLE"
+      script="CoreEnableAlias"
+      match="^ss\s+core\s+(on|off)$"
+      regexp="y"
+      ignore_case="y"
+      enabled="y"
+      sequence="20"
+  ></alias>
+  <alias
+      name="SS_CORE_STATUS"
+      script="CoreStatusAlias"
+      match="^ss\s+core\s+status$"
+      regexp="y"
+      ignore_case="y"
+      enabled="y"
+      sequence="20"
+  ></alias>
+  <alias
+      name="SS_CORE_NOTICES"
+      script="CoreNoticesAlias"
+      match="^ss\s+core\s+notices\s+(on|off)$"
+      regexp="y"
+      ignore_case="y"
+      enabled="y"
+      sequence="20"
+  ></alias>
+</aliases>
+
+<script>
+<![CDATA[
+
+CORE_TRIGGER_GROUP = "SS_CORE"
+local coreEnabled = GetVariable("core_enabled") ~= "false"
+local chakraNoticesEnabled = GetVariable("chakra_notices_enabled") ~= "false"
+
+local function Clamp(value, low, high)
+    value = tonumber(value) or low
+    if value < low then return low end
+    if value > high then return high end
+    return value
+end
+
+local function Round(value)
+    return math.floor((tonumber(value) or 0) + 0.5)
+end
+
+local function RGBName(r, g, b)
+    r = Clamp(Round(r), 0, 255)
+    g = Clamp(Round(g), 0, 255)
+    b = Clamp(Round(b), 0, 255)
+    -- MUSHclient colour integers use Windows COLORREF order: rr + gg*256 + bb*65536.
+    return RGBColourToName(r + g * 256 + b * 65536)
+end
+
+local function Lerp(a, b, t)
+    return a + (b - a) * t
+end
+
+local function HPGradient(percent)
+    local t = Clamp(percent, 0, 100) / 100
+    return RGBName(255 * (1 - t), 255 * t, 0)
+end
+
+local function MPGradient(percent)
+    local p = Clamp(percent, 0, 100)
+
+    -- 0% red -> 50% light purple -> 100% cyan.
+    local r, g, b
+    if p <= 50 then
+        local t = p / 50
+        r = Lerp(255, 200, t)
+        g = Lerp(0,   135, t)
+        b = Lerp(0,   255, t)
+    else
+        local t = (p - 50) / 50
+        r = Lerp(200, 0,   t)
+        g = Lerp(135, 255, t)
+        b = Lerp(255, 255, t)
+    end
+
+    return RGBName(r, g, b)
+end
+
+local function SafePercent(current, maximum)
+    current = tonumber(current) or 0
+    maximum = tonumber(maximum) or 0
+    if maximum <= 0 then return 0 end
+    return Clamp((current / maximum) * 100, 0, 100)
+end
+
+function ColourStats(name, line, wildcards)
+    local hpColour = HPGradient(SafePercent(wildcards[3], wildcards[5]))
+    local mpColour = MPGradient(SafePercent(wildcards[7], wildcards[9]))
+
+    ColourTell("green", "", wildcards[1] or "<<")
+    Tell(wildcards[2] or "HP: ")
+    ColourTell(hpColour, "", wildcards[3] or "")
+    Tell((wildcards[4] or "/") .. (wildcards[5] or "") .. (wildcards[6] or " MP: "))
+    ColourTell(mpColour, "", wildcards[7] or "")
+    Tell(wildcards[8] or "/")
+    ColourTell(mpColour, "", wildcards[9] or "")
+    ColourTell("green", "", wildcards[10] or ">>")
+    Note("")
+end
+
+function ColourCondition(name, line, wildcards)
+    local hpColour = HPGradient(tonumber(wildcards[3]) or 0)
+    local spColour = MPGradient(tonumber(wildcards[5]) or 0)
+
+    ColourTell("green", "", wildcards[1] or "<<")
+    Tell(wildcards[2] or "OVERALL CONDITION:<HP:")
+    ColourTell(hpColour, "", wildcards[3] or "")
+    Tell(wildcards[4] or "%> <SP:")
+    ColourTell(spColour, "", wildcards[5] or "")
+    Tell(wildcards[6] or "%> <")
+    ColourTell("red", "", wildcards[7] or "Mob")
+    Tell(wildcards[8] or ": None> ")
+    ColourTell("lightgreen", "", wildcards[9] or "Exp")
+    Tell(wildcards[10] or ":0%")
+    ColourTell("green", "", wildcards[11] or ">>")
+    Note("")
+end
+
+function ChakraReadyNotice(name, line, wildcards)
+    if not chakraNoticesEnabled then
+        -- This trigger omits the server line so the portable colourized form owns
+        -- the display. When notices are disabled, reproduce one normal line.
+        Note(line or "You can use chakra again.")
+        return
+    end
+
+    for i = 1, 6 do
+        ColourNote("magenta", "", line or "You can use chakra again.")
+    end
+end
+
+local function SetCoreEnabled(enabled)
+    coreEnabled = enabled and true or false
+    SetVariable("core_enabled", coreEnabled and "true" or "false")
+    EnableGroup(CORE_TRIGGER_GROUP, coreEnabled)
+end
+
+-- Public API used by the suite installer during v1.x -> v2.0 migration.
+function SetPortableEnabled(value)
+    local enabled = (value == true) or tostring(value or ""):lower() == "true" or tostring(value or "") == "1"
+    SetCoreEnabled(enabled)
+    return coreEnabled and "true" or "false"
+end
+
+function CoreEnableAlias(name, line, wildcards)
+    SetCoreEnabled(tostring(wildcards[1] or ""):lower() == "on")
+    ColourNote(coreEnabled and "lime" or "yellow", "", "[SquareSoft Core] " .. (coreEnabled and "enabled." or "disabled."))
+end
+
+function CoreStatusAlias(name, line, wildcards)
+    ColourNote(coreEnabled and "lime" or "yellow", "", "[SquareSoft Core] Portable core triggers are " .. (coreEnabled and "ON." or "OFF."))
+    ColourNote("gray", "", "  Chakra ready notice: " .. (chakraNoticesEnabled and "ON" or "OFF"))
+end
+
+function CoreNoticesAlias(name, line, wildcards)
+    chakraNoticesEnabled = tostring(wildcards[1] or ""):lower() == "on"
+    SetVariable("chakra_notices_enabled", chakraNoticesEnabled and "true" or "false")
+    ColourNote("lime", "", "[SquareSoft Core] Chakra ready notice " .. (chakraNoticesEnabled and "enabled." or "disabled."))
+end
+
+function OnPluginInstall()
+    EnableGroup(CORE_TRIGGER_GROUP, coreEnabled)
+end
+
+function OnPluginEnable()
+    EnableGroup(CORE_TRIGGER_GROUP, coreEnabled)
+end
+
+]]>
+</script>
+</muclient>
